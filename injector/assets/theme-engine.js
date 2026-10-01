@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.1.1'
+  var VERSION = '1.2.0'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -323,6 +323,18 @@
     return out
   }
 
+  // The palette Freebuff ships with, straight from its own :root block. It is
+  // only used to draw the Default thumbnail.
+  var STOCK_COLORS = {
+    '--bg': '#0a0a0a',
+    '--surface': '#171717',
+    '--surface-2': '#1c1c1c',
+    '--chrome': '#0f0f0f',
+    '--text': '#ebebeb',
+    '--muted': '#9e9e9e',
+    '--brand': '#b5cea5',
+  }
+
   var PRESETS = [
     { id: 'default', label: 'Freebuff Default', scheme: 'dark', colors: null },
 
@@ -555,6 +567,87 @@
     return 'rgb(' + r + ' ' + g + ' ' + b + ' / ' + Math.round(color.a * 100) + '%)'
   }
 
+  /* ------------------------------------------------------------------ *
+   * Palette adjustments
+   *
+   * The dials in the Presets tab retune whatever palette is in use: hue turn,
+   * saturation, brightness, contrast, and a separate lift for text tokens.
+   * They run on the finished colour map, so they work the same on a preset, on
+   * hand-picked overrides, or on both at once.
+   * ------------------------------------------------------------------ */
+
+  var DEFAULT_ADJUST = { hue: 0, sat: 100, bright: 100, contrast: 100, text: 100 }
+
+  var ADJUST_DEFS = [
+    { key: 'hue', label: 'Hue', min: -180, max: 180, step: 1, unit: '\u00b0' },
+    { key: 'sat', label: 'Saturation', min: 0, max: 200, step: 1, unit: '%' },
+    { key: 'bright', label: 'Brightness', min: 50, max: 150, step: 1, unit: '%' },
+    { key: 'contrast', label: 'Contrast', min: 50, max: 150, step: 1, unit: '%' },
+    { key: 'text', label: 'Text', min: 50, max: 150, step: 1, unit: '%' },
+  ]
+
+  var TEXT_TOKENS = [
+    '--text', '--muted', '--faint', '--placeholder', '--sidebar-ink', '--sidebar-muted',
+    '--tab-indicator', '--tab-selected-text', '--primary-action-text', '--brand-ink',
+  ]
+
+  function isTextToken(name) {
+    return TEXT_TOKENS.indexOf(name) !== -1 || /-text$/.test(name) || /ink$/.test(name)
+  }
+
+  function bound(n, lo, hi) {
+    return n < lo ? lo : n > hi ? hi : n
+  }
+
+  function hexToHsl(hex) {
+    var r = parseInt(hex.slice(1, 3), 16) / 255
+    var g = parseInt(hex.slice(3, 5), 16) / 255
+    var b = parseInt(hex.slice(5, 7), 16) / 255
+    var max = Math.max(r, g, b)
+    var min = Math.min(r, g, b)
+    var l = (max + min) / 2
+    var h = 0
+    var s = 0
+    if (max !== min) {
+      var d = max - min
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60
+      else if (max === g) h = ((b - r) / d + 2) * 60
+      else h = ((r - g) / d + 4) * 60
+    }
+    return { h: h, s: s * 100, l: l * 100 }
+  }
+
+  function hslToHex(hsl) {
+    var h = ((hsl.h % 360) + 360) % 360 / 360
+    var s = bound(hsl.s, 0, 100) / 100
+    var l = bound(hsl.l, 0, 100) / 100
+    function f(n) {
+      var k = (n + h * 12) % 12
+      var a = s * Math.min(l, 1 - l)
+      return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))
+    }
+    return rgbToHex(f(0) * 255, f(8) * 255, f(4) * 255)
+  }
+
+  function adjustmentsActive() {
+    return !adjustIsDefault(state.adjust)
+  }
+
+  /** Retune one colour value. Anything unparseable (var(), color-mix(), px) is left alone. */
+  function adjustColor(value, token) {
+    var c = parseColor(value)
+    if (!c) return value
+    var hsl = hexToHsl(c.hex)
+    var a = state.adjust
+    if (a.hue) hsl.h = (hsl.h + a.hue) % 360
+    if (a.sat !== 100) hsl.s = hsl.s * (a.sat / 100)
+    if (a.bright !== 100) hsl.l = hsl.l * (a.bright / 100)
+    if (a.contrast !== 100) hsl.l = (hsl.l - 50) * (a.contrast / 100) + 50
+    if (a.text !== 100 && isTextToken(token)) hsl.l = hsl.l * (a.text / 100)
+    return toCss({ hex: hslToHex(hsl), a: c.a })
+  }
+
   /** Resolve a token to a concrete rgb()/rgba() by letting the browser compute it. */
   var probeEl = null
   function resolveTokenColor(token) {
@@ -583,6 +676,7 @@
     layout: {},
     raw: '',
     scheme: '',
+    adjust: clone(DEFAULT_ADJUST),
   }
 
   function clone(o) {
@@ -598,8 +692,29 @@
       if (raw.layout && typeof raw.layout === 'object') s.layout = raw.layout
       if (typeof raw.raw === 'string') s.raw = raw.raw
       if (raw.scheme) s.scheme = String(raw.scheme)
+      s.adjust = normalizeAdjust(raw.adjust)
     }
     return s
+  }
+
+  /** Only real numbers, clamped to the dial range, so nothing can poison the palette. */
+  function normalizeAdjust(raw) {
+    var out = clone(DEFAULT_ADJUST)
+    if (raw && typeof raw === 'object') {
+      ADJUST_DEFS.forEach(function (d) {
+        var v = Number(raw[d.key])
+        if (isFinite(v)) out[d.key] = bound(v, d.min, d.max)
+      })
+    }
+    return out
+  }
+
+  function adjustIsDefault(a) {
+    if (!a) return true
+    for (var i = 0; i < ADJUST_DEFS.length; i++) {
+      if (Number(a[ADJUST_DEFS[i].key]) !== DEFAULT_ADJUST[ADJUST_DEFS[i].key]) return false
+    }
+    return true
   }
 
   /* ------------------------------------------------------------------ *
@@ -679,6 +794,7 @@
     }
     if (s.raw) out.raw = s.raw
     if (s.scheme) out.scheme = s.scheme
+    if (!adjustIsDefault(s.adjust)) out.adjust = normalizeAdjust(s.adjust)
     return SHARE_PREFIX + toBase64Url(JSON.stringify(out))
   }
 
@@ -795,6 +911,8 @@
     if (preset && preset.colors) for (var k0 in preset.colors) out[k0] = preset.colors[k0]
     for (var k in state.colors) out[k] = toCss(state.colors[k])
     for (var k2 in state.layout) out[k2] = state.layout[k2]
+    // The dials run last so they retune the finished palette, whatever built it.
+    if (adjustmentsActive()) for (var k3 in out) out[k3] = adjustColor(out[k3], k3)
     return out
   }
 
@@ -1041,6 +1159,18 @@
   --fbts-accent2: #8affc1;
   --fbts-danger: #ff6b6b;
   --fbts-radius: 12px;
+  /*
+   * The page is built the way an audio plugin's settings page is: square-ish
+   * boxes with a titled frame around each group, thin bevels instead of
+   * shadows, and controls that look like hardware (dials, round colour spots,
+   * folder tabs). Colours still come from the live app tokens, so the studio
+   * keeps matching whatever theme is applied.
+   */
+  --fbts-radius-box: 5px;
+  --fbts-bevel: inset 0 1px 0 rgba(255,255,255,.05), inset 0 -1px 0 rgba(0,0,0,.28);
+  --fbts-sunken: inset 0 1px 3px rgba(0,0,0,.45);
+  --fbts-head-bg: color-mix(in srgb, var(--fbts-ink) 8%, transparent);
+  --fbts-fill: color-mix(in srgb, var(--fbts-ink) 4%, transparent);
 }
 .fbts-root { position: fixed; inset: 0; pointer-events: none; z-index: 2147483600; }
 
@@ -1053,8 +1183,15 @@
 }
 .fbts-panel.open { display: flex; }
 
-.fbts-head { display: flex; align-items: center; gap: 10px; padding: 12px 12px 10px 14px; border-bottom: 1px solid var(--fbts-line); background: var(--fbts-panel2); }
-.fbts-title { font-size: 13px; font-weight: 700; letter-spacing: .01em; }
+.fbts-titlebar {
+  display: flex; align-items: center; gap: 11px; padding: 11px 13px 10px 15px;
+  border-bottom: 1px solid var(--fbts-line); background: var(--fbts-panel2);
+  box-shadow: var(--fbts-bevel);
+}
+.fbts-titlebar-icon { display: flex; flex: none; color: var(--fbts-accent); }
+.fbts-titlebar-icon svg { width: 19px; height: 19px; }
+.fbts-titlebar-text { min-width: 0; }
+.fbts-title { font-size: 13.5px; font-weight: 700; letter-spacing: .01em; }
 .fbts-head-row { display: flex; align-items: center; gap: 8px; }
 .fbts-badge {
   display: inline-flex; align-items: center; height: 17px; padding: 0 7px; flex: none;
@@ -1066,66 +1203,146 @@
 .fbts-version { cursor: pointer; }
 .fbts-version:hover { color: var(--fbts-mute); text-decoration: underline; }
 .fbts-head .grow { flex: 1; }
-.fbts-x { width: 26px; height: 26px; border-radius: 8px; border: 1px solid var(--fbts-line); background: transparent; color: var(--fbts-mute); cursor: pointer; font-size: 14px; line-height: 1; }
+.fbts-x { width: 26px; height: 26px; border-radius: var(--fbts-radius-box); border: 1px solid var(--fbts-line); background: transparent; color: var(--fbts-mute); cursor: pointer; font-size: 14px; line-height: 1; }
 .fbts-x:hover { color: var(--fbts-ink); border-color: var(--fbts-accent); }
 
-.fbts-tabs { display: flex; gap: 2px; padding: 8px 8px 0; border-bottom: 1px solid var(--fbts-line); background: var(--fbts-panel2); overflow-x: auto; scrollbar-width: none; }
+/* ---- folder tabs, the active one open into the page ---- */
+.fbts-tabs { display: flex; align-items: flex-end; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--fbts-line); background: var(--fbts-panel2); overflow-x: auto; scrollbar-width: none; }
 .fbts-tabs::-webkit-scrollbar { display: none; }
-.fbts-tab { padding: 7px 11px; border-radius: 8px 8px 0 0; font-size: 11.5px; font-weight: 600; color: var(--fbts-mute); cursor: pointer; border: 1px solid transparent; border-bottom: none; white-space: nowrap; }
-.fbts-tab:hover { color: var(--fbts-ink); }
-.fbts-tab.active { color: var(--fbts-ink); background: var(--fbts-panel); border-color: var(--fbts-line); }
+.fbts-tab {
+  flex: none; padding: 8px 15px 7px; border: 1px solid transparent; border-bottom: none;
+  border-radius: 7px 7px 0 0; font-size: 11.5px; font-weight: 600; color: var(--fbts-mute);
+  cursor: pointer; white-space: nowrap; box-shadow: var(--fbts-bevel);
+}
+.fbts-tab:hover:not(.active) { color: var(--fbts-ink); background: color-mix(in srgb, var(--fbts-ink) 6%, transparent); }
+.fbts-tab.active { color: var(--fbts-ink); background: var(--fbts-panel); border-color: var(--fbts-line); margin-bottom: -1px; padding-bottom: 8px; }
 
-.fbts-body { overflow-y: auto; padding: 12px; flex: 1; }
+.fbts-body { overflow-y: auto; padding: 10px; flex: 1; }
 .fbts-body::-webkit-scrollbar { width: 10px; }
-.fbts-body::-webkit-scrollbar-thumb { background: #31353f; border-radius: 6px; border: 3px solid var(--fbts-panel); }
+.fbts-body::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fbts-ink) 20%, transparent); border-radius: 6px; border: 3px solid transparent; background-clip: padding-box; }
 
-.fbts-section { margin-bottom: 16px; }
-.fbts-section-title { font-size: 10px; text-transform: uppercase; letter-spacing: .09em; color: var(--fbts-faint); font-weight: 700; margin: 0 0 8px 2px; }
+/* ---- group box: the unit this page is built from ---- */
+.fbts-group { border: 1px solid var(--fbts-line); border-radius: var(--fbts-radius-box); background: var(--fbts-fill); margin-bottom: 10px; overflow: hidden; }
+.fbts-group-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-bottom: 1px solid var(--fbts-line);
+  background: var(--fbts-head-bg); box-shadow: var(--fbts-bevel); color: var(--fbts-mute);
+  font-size: 9.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; user-select: none;
+}
+.fbts-group-head .grow { flex: 1; }
+.fbts-group-body { padding: 9px; }
+.fbts-group.scroll > .fbts-group-body { max-height: min(46vh, 420px); overflow-y: auto; }
+.fbts-group.scroll > .fbts-group-body::-webkit-scrollbar { width: 10px; }
+.fbts-group.scroll > .fbts-group-body::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--fbts-ink) 22%, transparent); border-radius: 6px; border: 3px solid transparent; background-clip: padding-box; }
 
-.fbts-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.fbts-preset { border: 1px solid var(--fbts-line); border-radius: 10px; padding: 8px; cursor: pointer; background: var(--fbts-panel2); text-align: left; transition: border-color .12s, transform .12s; }
-.fbts-preset:hover { border-color: var(--fbts-accent); transform: translateY(-1px); }
-.fbts-preset.active { border-color: var(--fbts-accent); box-shadow: 0 0 0 2px rgba(91,140,255,.22); }
-.fbts-swatches { display: flex; gap: 3px; margin-bottom: 6px; }
-.fbts-swatch { width: 100%; height: 16px; border-radius: 4px; border: 1px solid rgba(255,255,255,.09); }
-.fbts-preset-name { font-size: 11px; font-weight: 600; color: var(--fbts-ink); }
+/* ---- preset cards: a live miniature of Freebuff wearing the preset ---- */
+.fbts-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 9px; }
+.fbts-preset {
+  border: 1px solid var(--fbts-line); border-radius: var(--fbts-radius-box);
+  padding: 4px 4px 0; background: var(--fbts-fill); cursor: pointer; text-align: center;
+}
+.fbts-preset:hover { border-color: color-mix(in srgb, var(--fbts-accent) 65%, var(--fbts-line)); }
+.fbts-preset.active { border-color: var(--fbts-accent); box-shadow: 0 0 0 1px var(--fbts-accent); }
+.fbts-thumb {
+  display: flex; width: 100%; aspect-ratio: 16 / 10; overflow: hidden;
+  border: 1px solid rgba(0,0,0,.45); border-radius: 3px; background: var(--t-bg, var(--fbts-panel));
+}
+.fbts-thumb .t-rail { width: 9%; flex: none; display: flex; flex-direction: column; align-items: center; gap: 7%; padding: 9% 0; background: var(--t-chrome, var(--fbts-panel2)); }
+.fbts-thumb .t-rail i { width: 46%; aspect-ratio: 1; border-radius: 30%; background: var(--t-muted, #888); opacity: .5; }
+.fbts-thumb .t-rail i:first-child { background: var(--t-brand, #6cf); opacity: 1; }
+.fbts-thumb .t-side { width: 27%; flex: none; display: flex; flex-direction: column; gap: 8%; padding: 9% 7%; background: var(--t-chrome, var(--fbts-panel2)); border-left: 1px solid rgba(0,0,0,.3); }
+.fbts-thumb .t-side b { height: 4%; min-height: 1.5px; border-radius: 2px; background: var(--t-muted, #888); opacity: .45; }
+.fbts-thumb .t-side b.w { background: var(--t-brand, #6cf); opacity: .85; }
+.fbts-thumb .t-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6%; padding: 8%; background: var(--t-bg, var(--fbts-panel)); }
+.fbts-thumb .t-line { height: 3.5%; min-height: 1.5px; border-radius: 2px; background: var(--t-text, #eee); opacity: .32; }
+.fbts-thumb .t-line.short { width: 55%; }
+.fbts-thumb .t-bubble { height: 30%; border-radius: 3px; border: 1px solid rgba(255,255,255,.07); background: var(--t-surface, var(--fbts-panel2)); }
+.fbts-thumb .t-composer { height: 12%; margin-top: auto; border-radius: 999px; border: 1px solid var(--t-brand, #6cf); background: var(--t-surface, var(--fbts-panel2)); }
+.fbts-preset-name { padding: 5px 2px 6px; font-size: 10.5px; font-weight: 600; color: var(--fbts-mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fbts-preset.active .fbts-preset-name { color: var(--fbts-ink); }
 
-.fbts-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+/* ---- dials ---- */
+.fbts-knobs { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 2px; }
+.fbts-knob { width: 66px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: ns-resize; outline: none; user-select: none; }
+.fbts-knob-dial {
+  position: relative; width: 44px; height: 44px; border-radius: 50%;
+  background: conic-gradient(from 225deg, var(--fbts-accent) 0 var(--fbts-knob-fill, 0deg), color-mix(in srgb, var(--fbts-ink) 15%, transparent) var(--fbts-knob-fill, 0deg) 270deg, transparent 270deg);
+}
+.fbts-knob-dial::after {
+  content: ''; position: absolute; inset: 4px; border-radius: 50%; border: 1px solid var(--fbts-line);
+  background: radial-gradient(circle at 50% 32%, color-mix(in srgb, var(--fbts-ink) 13%, var(--fbts-panel2)), var(--fbts-panel) 72%);
+  box-shadow: var(--fbts-sunken);
+}
+.fbts-knob-needle { position: absolute; z-index: 1; left: 50%; top: 50%; width: 2px; height: 13px; margin: -13px 0 0 -1px; border-radius: 2px; background: var(--fbts-ink); transform-origin: 50% 100%; }
+.fbts-knob-value { font-family: var(--fbts-mono); font-size: 9.5px; color: var(--fbts-ink); font-variant-numeric: tabular-nums; }
+.fbts-knob-label { font-size: 9.5px; line-height: 1.2; color: var(--fbts-mute); text-align: center; }
+.fbts-knob:focus-visible .fbts-knob-dial { outline: 2px solid var(--fbts-accent); outline-offset: 2px; }
+
+/* ---- round colour spots ---- */
+.fbts-circles { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 4px; }
+.fbts-circle { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 64px; }
+.fbts-circle input {
+  width: 30px; height: 30px; padding: 0; flex: none; cursor: pointer;
+  border: 1px solid rgba(0,0,0,.45); border-radius: 50%; background: none;
+  appearance: none; -webkit-appearance: none; box-shadow: var(--fbts-bevel);
+}
+.fbts-circle input::-webkit-color-swatch-wrapper { padding: 0; }
+.fbts-circle input::-webkit-color-swatch { border: none; border-radius: 50%; }
+.fbts-circle-label { font-size: 9.5px; line-height: 1.25; color: var(--fbts-mute); text-align: center; }
+
+/* ---- options ---- */
+.fbts-option { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 11.5px; color: var(--fbts-ink); cursor: pointer; }
+.fbts-option input { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--fbts-accent); }
+
+.fbts-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .fbts-row-label { flex: 1; font-size: 11.5px; color: var(--fbts-mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fbts-row-label code { font-family: var(--fbts-mono); font-size: 9.5px; color: var(--fbts-faint); display: block; }
-.fbts-swatchinput { width: 26px; height: 24px; padding: 0; border: 1px solid var(--fbts-line); border-radius: 6px; background: none; cursor: pointer; flex: none; }
+.fbts-swatchinput { width: 26px; height: 24px; padding: 0; border: 1px solid var(--fbts-line); border-radius: 4px; background: none; cursor: pointer; flex: none; }
 .fbts-swatchinput::-webkit-color-swatch-wrapper { padding: 2px; }
-.fbts-swatchinput::-webkit-color-swatch { border: none; border-radius: 4px; }
+.fbts-swatchinput::-webkit-color-swatch { border: none; border-radius: 3px; }
 .fbts-textinput {
-  width: 104px; flex: none; background: var(--fbts-panel2); border: 1px solid var(--fbts-line); color: var(--fbts-ink);
-  border-radius: 7px; padding: 5px 7px; font-size: 11px; font-family: var(--fbts-mono); outline: none;
+  width: 104px; flex: none; background: var(--fbts-panel); border: 1px solid var(--fbts-line); color: var(--fbts-ink);
+  border-radius: 4px; padding: 5px 7px; font-size: 11px; font-family: var(--fbts-mono); outline: none;
+  box-shadow: var(--fbts-sunken);
 }
 .fbts-textinput:focus { border-color: var(--fbts-accent); }
 .fbts-alpha { width: 52px; flex: none; accent-color: var(--fbts-accent); }
-.fbts-mini { width: 24px; height: 24px; flex: none; border-radius: 6px; border: 1px solid var(--fbts-line); background: transparent; color: var(--fbts-faint); cursor: pointer; font-size: 11px; }
+.fbts-mini { width: 24px; height: 24px; flex: none; border-radius: 4px; border: 1px solid var(--fbts-line); background: transparent; color: var(--fbts-faint); cursor: pointer; font-size: 11px; }
 .fbts-mini:hover { color: var(--fbts-danger); border-color: var(--fbts-danger); }
 
-.fbts-accordion { border: 1px solid var(--fbts-line); border-radius: 10px; margin-bottom: 8px; overflow: hidden; background: var(--fbts-panel2); }
-.fbts-accordion-head { display: flex; align-items: center; gap: 8px; padding: 9px 11px; cursor: pointer; font-size: 11.5px; font-weight: 600; user-select: none; }
-.fbts-accordion-head .chev { color: var(--fbts-faint); font-size: 10px; transition: transform .15s; }
+.fbts-accordion { border: 1px solid var(--fbts-line); border-radius: var(--fbts-radius-box); margin-bottom: 8px; overflow: hidden; background: var(--fbts-fill); }
+.fbts-accordion-head { display: flex; align-items: center; gap: 8px; padding: 7px 9px; cursor: pointer; font-size: 11.5px; font-weight: 600; user-select: none; background: var(--fbts-head-bg); box-shadow: var(--fbts-bevel); }
+.fbts-accordion-head .chev { color: var(--fbts-faint); font-size: 9px; transition: transform .15s; }
 .fbts-accordion.open .chev { transform: rotate(90deg); }
-.fbts-accordion-body { display: none; padding: 4px 11px 10px; border-top: 1px solid var(--fbts-line); }
+.fbts-accordion-body { display: none; padding: 7px 9px 9px; border-top: 1px solid var(--fbts-line); }
 .fbts-accordion.open .fbts-accordion-body { display: block; }
 
-.fbts-btn { padding: 7px 12px; border-radius: 8px; border: 1px solid var(--fbts-line); background: var(--fbts-panel2); color: var(--fbts-ink); font-size: 11.5px; font-weight: 600; cursor: pointer; }
+.fbts-btn { padding: 7px 12px; border-radius: var(--fbts-radius-box); border: 1px solid var(--fbts-line); background: var(--fbts-panel2); color: var(--fbts-ink); font-size: 11.5px; font-weight: 600; cursor: pointer; box-shadow: var(--fbts-bevel); }
 .fbts-btn:hover { border-color: var(--fbts-accent); }
 .fbts-btn.primary { background: var(--fbts-accent); border-color: var(--fbts-accent); color: #0a0c10; }
 .fbts-btn.danger:hover { border-color: var(--fbts-danger); color: var(--fbts-danger); }
 .fbts-actions { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px 12px; border-top: 1px solid var(--fbts-line); background: var(--fbts-panel2); }
 .fbts-actions .grow { flex: 1; }
 
-.fbts-note { font-size: 10.5px; color: var(--fbts-faint); line-height: 1.5; margin: 6px 2px 0; }
-.fbts-textarea { width: 100%; min-height: 150px; background: #0e0f13; border: 1px solid var(--fbts-line); border-radius: 9px; color: var(--fbts-ink); font-family: var(--fbts-mono); font-size: 11px; line-height: 1.5; padding: 9px; resize: vertical; outline: none; }
+/* ---- footer bar ---- */
+.fbts-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 9px 12px; border-top: 1px solid var(--fbts-line); background: var(--fbts-panel2); box-shadow: var(--fbts-bevel); }
+.fbts-footer .grow { flex: 1; }
+.fbts-seg { display: flex; flex: none; border: 1px solid var(--fbts-line); border-radius: var(--fbts-radius-box); overflow: hidden; box-shadow: var(--fbts-sunken); }
+.fbts-seg button {
+  width: 34px; padding: 7px 0; border: 0; border-left: 1px solid var(--fbts-line); background: var(--fbts-panel);
+  color: var(--fbts-mute); font-family: var(--fbts-font); font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.fbts-seg button:first-child { border-left: 0; }
+.fbts-seg button:hover { color: var(--fbts-ink); }
+.fbts-seg button.active { background: var(--fbts-accent); color: #0a0c10; }
+
+/* Between muted and faint: faint alone drops under 3:1 in the light presets. */
+.fbts-note { font-size: 10.5px; color: color-mix(in srgb, var(--fbts-mute) 80%, var(--fbts-faint)); line-height: 1.5; margin: 6px 2px 0; }
+.fbts-textarea { width: 100%; min-height: 150px; background: var(--fbts-panel); border: 1px solid var(--fbts-line); border-radius: 4px; color: var(--fbts-ink); font-family: var(--fbts-mono); font-size: 11px; line-height: 1.5; padding: 9px; resize: vertical; outline: none; box-shadow: var(--fbts-sunken); }
 .fbts-textarea:focus { border-color: var(--fbts-accent); }
-.fbts-textarea.drop { border-color: var(--fbts-accent); background: color-mix(in srgb, var(--fbts-accent) 12%, #0e0f13); }
+.fbts-textarea.drop { border-color: var(--fbts-accent); background: color-mix(in srgb, var(--fbts-accent) 12%, var(--fbts-panel)); }
 .fbts-code-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .fbts-code-row input { flex: 1; min-width: 0; margin: 0; font-family: var(--fbts-mono); font-size: 11px; }
-.fbts-search { width: 100%; background: var(--fbts-panel2); border: 1px solid var(--fbts-line); border-radius: 8px; color: var(--fbts-ink); padding: 7px 9px; font-size: 11.5px; outline: none; margin-bottom: 8px; }
+.fbts-search { width: 100%; background: var(--fbts-panel); border: 1px solid var(--fbts-line); border-radius: 4px; color: var(--fbts-ink); padding: 7px 9px; font-size: 11.5px; outline: none; margin-bottom: 8px; box-shadow: var(--fbts-sunken); }
 .fbts-search:focus { border-color: var(--fbts-accent); }
 .fbts-toast {
   position: fixed; right: 18px; bottom: 18px; pointer-events: none; opacity: 0;
@@ -1219,11 +1436,13 @@
   background: var(--fbts-bg);
 }
 
-.fbts-head {
-  padding: 18px 24px 14px;
-  background: transparent;
+/* ---- title bar: the page banner, like a plugin's header ---- */
+.fbts-titlebar {
+  padding: 15px 20px 13px;
+  background: var(--fbts-panel2);
   border-bottom: 1px solid var(--fbts-line);
 }
+.fbts-titlebar-icon svg { width: 22px; height: 22px; }
 .fbts-title { font-size: var(--font-size-heading, 18px); font-weight: var(--font-weight-semibold, 600); }
 .fbts-sub { font-size: var(--fbts-label-size); }
 .fbts-x {
@@ -1232,39 +1451,36 @@
 }
 .fbts-x:hover { background: color-mix(in srgb, var(--fbts-ink) 8%, transparent); }
 
-.fbts-page-main { flex: 1; display: flex; min-height: 0; }
-
+/* ---- tabs: a folder strip across the top of the page ---- */
 .fbts-tabs {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 2px;
-  width: 200px;
-  flex: none;
-  padding: 14px 12px;
-  border-bottom: none;
-  border-right: 1px solid var(--fbts-line);
+  padding: 0 18px;
+  gap: 3px;
   background: var(--fbts-panel2);
-  overflow-x: visible;
-  overflow-y: auto;
 }
 .fbts-tab {
-  padding: 8px 11px;
-  border: none;
-  border-radius: var(--fbts-radius);
+  padding: 8px 17px 7px;
+  border-radius: 7px 7px 0 0;
   font-size: var(--fbts-ui-size);
   font-weight: var(--font-weight-medium, 450);
 }
-.fbts-tab.active { border: none; background: color-mix(in srgb, var(--fbts-ink) 11%, transparent); }
-.fbts-tab:hover:not(.active) { background: color-mix(in srgb, var(--fbts-ink) 6%, transparent); }
+.fbts-tab.active { padding-bottom: 8px; }
 
-.fbts-body { padding: 22px 28px 40px; }
-.fbts-actions { background: transparent; padding: 14px 24px; }
-.fbts-presets { grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 10px; }
-.fbts-preset { padding: 10px; border-radius: var(--fbts-radius); }
-.fbts-accordion { border-radius: var(--fbts-radius); }
+.fbts-body { padding: 14px 18px 26px; }
+.fbts-footer { padding: 10px 18px; }
+.fbts-group-head { padding: 7px 11px; font-size: var(--font-size-caption, 10px); }
+.fbts-group-body { padding: 11px; }
+/* Wide pages fit more thumbnails per row, which is the point of the grid. */
+.fbts-presets { grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 12px; }
+.fbts-group.scroll > .fbts-group-body { max-height: min(52vh, 520px); }
+.fbts-knobs { gap: 12px 6px; }
+.fbts-knob { width: 76px; }
+.fbts-knob-dial { width: 50px; height: 50px; }
+.fbts-knob-needle { height: 15px; margin-top: -15px; }
+.fbts-circles { gap: 10px 6px; }
+.fbts-circle { width: 74px; }
+.fbts-circle input { width: 34px; height: 34px; }
 .fbts-row-label { font-size: var(--fbts-ui-size); }
-.fbts-textinput { width: 128px; border-radius: var(--fbts-radius); }
-.fbts-swatchinput { border-radius: var(--fbts-radius); }
+.fbts-textinput { width: 128px; }
 .fbts-toast { left: 50%; right: auto; bottom: 28px; transform: translate(-50%, 8px); }
 .fbts-toast.show { transform: translate(-50%, 0); }
 `
@@ -1470,15 +1686,16 @@
     var root = el('div', { class: 'fbts-root' }, [panel, toast, chip, modalWrap])
     shadow.appendChild(root)
 
-    /* ---- header ---- */
+    /* ---- title bar ---- */
     var schemeLabel = el('span', {
       class: 'fbts-version',
       title: 'Check for updates',
       text: 'v' + VERSION,
       onclick: function () { checkForUpdates(true) },
     })
-    var head = el('div', { class: 'fbts-head' }, [
-      el('div', {}, [
+    var head = el('div', { class: 'fbts-titlebar' }, [
+      el('span', { class: 'fbts-titlebar-icon', html: RAIL_ICON }),
+      el('div', { class: 'fbts-titlebar-text' }, [
         el('div', { class: 'fbts-head-row' }, [
           el('div', { class: 'fbts-title', text: 'Theme Studio' }),
           el('span', {
@@ -1530,6 +1747,147 @@
       return p
     }
 
+    /** A titled frame. Every panel on this page is one of these. */
+    function group(title, children, opts) {
+      opts = opts || {}
+      var headRow = el('div', { class: 'fbts-group-head' }, [el('span', { text: title }), el('div', { class: 'grow' })],)
+      ;(opts.actions || []).forEach(function (a) { headRow.appendChild(a) })
+      return el('div', { class: 'fbts-group' + (opts.scroll ? ' scroll' : '') }, [
+        headRow,
+        el('div', { class: 'fbts-group-body' }, children),
+      ])
+    }
+
+    /** A small link that sits in a group header. */
+    function headLink(text, title, onclick) {
+      var b = el('button', {
+        class: 'fbts-head-link', type: 'button', text: text, title: title, onclick: onclick,
+        style: 'background:none;border:0;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer;text-transform:inherit;padding:0',
+      })
+      return b
+    }
+
+    /** The miniature Freebuff that each preset card wears. */
+    function thumbParts() {
+      return [
+        el('div', { class: 't-rail' }, [el('i'), el('i'), el('i'), el('i')]),
+        el('div', { class: 't-side' }, [
+          el('b', { class: 'w' }), el('b'), el('b'), el('b'), el('b'), el('b'),
+        ]),
+        el('div', { class: 't-main' }, [
+          el('div', { class: 't-line', style: 'width:72%' }),
+          el('div', { class: 't-line short' }),
+          el('div', { class: 't-bubble' }),
+          el('div', { class: 't-composer' }),
+        ]),
+      ]
+    }
+
+    /**
+     * Colours for one thumbnail. The Default card shows the palette Freebuff
+     * ships with, not the theme in use - otherwise it would just mirror
+     * whatever is applied and say nothing.
+     */
+    function thumbStyle(p) {
+      var c = p.colors || STOCK_COLORS
+      return (
+        '--t-bg:' + c['--bg'] +
+        ';--t-surface:' + c['--surface-2'] +
+        ';--t-chrome:' + c['--chrome'] +
+        ';--t-text:' + c['--text'] +
+        ';--t-muted:' + c['--muted'] +
+        ';--t-brand:' + c['--brand']
+      )
+    }
+
+    /*
+     * A dial. Drag up or down, scroll, or use the arrow keys; double-click puts
+     * it back to the middle. Values land in state.adjust and retune the whole
+     * palette through currentValues().
+     */
+    function knob(def) {
+      var needle = el('span', { class: 'fbts-knob-needle' })
+      var dial = el('div', { class: 'fbts-knob-dial' }, [needle])
+      var valueEl = el('div', { class: 'fbts-knob-value' })
+      var node = el(
+        'div',
+        { class: 'fbts-knob', role: 'slider', tabindex: '0', title: def.label + ' - drag or scroll, double-click to reset' },
+        [dial, valueEl, el('div', { class: 'fbts-knob-label', text: def.label })],
+      )
+      var span = def.max - def.min
+
+      function current() {
+        var v = Number(state.adjust ? state.adjust[def.key] : NaN)
+        return isFinite(v) ? v : DEFAULT_ADJUST[def.key]
+      }
+
+      function render() {
+        var v = current()
+        var t = (v - def.min) / span
+        needle.style.transform = 'rotate(' + (-135 + t * 270).toFixed(1) + 'deg)'
+        dial.style.setProperty('--fbts-knob-fill', (t * 270).toFixed(1) + 'deg')
+        valueEl.textContent = (v > 0 && def.key === 'hue' ? '+' : '') + v + def.unit
+        node.setAttribute('aria-label', def.label + ' adjustment, currently ' + v + def.unit)
+        node.setAttribute('aria-valuenow', String(v))
+      }
+
+      function set(v) {
+        v = bound(Math.round(v / def.step) * def.step, def.min, def.max)
+        if (v === current()) return
+        state.adjust[def.key] = v
+        applyState()
+        saveState(state)
+        render()
+      }
+
+      var lastY = 0
+      var dragging = false
+      node.addEventListener('pointerdown', function (e) {
+        if (e.button !== 0) return
+        dragging = true
+        lastY = e.clientY
+        e.preventDefault()
+        node.focus()
+        try {
+          node.setPointerCapture(e.pointerId)
+        } catch (err) {}
+      })
+      node.addEventListener('pointermove', function (e) {
+        if (!dragging) return
+        var dy = e.clientY - lastY
+        lastY = e.clientY
+        set(current() - dy * (e.shiftKey ? 0.15 : 1) * (span / 200))
+      })
+      function endDrag() {
+        if (!dragging) return
+        dragging = false
+        showToast(def.label + ': ' + current() + def.unit)
+      }
+      node.addEventListener('pointerup', endDrag)
+      node.addEventListener('pointercancel', endDrag)
+      node.addEventListener('dblclick', function () { set(DEFAULT_ADJUST[def.key]) })
+      node.addEventListener(
+        'wheel',
+        function (e) {
+          e.preventDefault()
+          set(current() + (e.deltaY < 0 ? def.step : -def.step) * (e.shiftKey ? 10 : 1))
+        },
+        { passive: false },
+      )
+      node.addEventListener('keydown', function (e) {
+        var nudge = def.step * (e.shiftKey ? 10 : 1)
+        if (e.key === 'ArrowUp' || e.key === 'ArrowRight') set(current() + nudge)
+        else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') set(current() - nudge)
+        else if (e.key === 'Home') set(DEFAULT_ADJUST[def.key])
+        else return
+        e.preventDefault()
+        e.stopPropagation()
+      })
+
+      render()
+      return { node: node, def: def, render: render, set: set }
+    }
+
     /* ---- persistence helpers ---- */
     function commit(message) {
       applyState()
@@ -1558,6 +1916,23 @@
         return typeof c === 'string' ? parseColor(c) || { hex: '#000000', a: 1 } : { hex: c.hex, a: c.a == null ? 1 : c.a }
       }
       return resolveTokenColor(token) || { hex: '#808080', a: 1 }
+    }
+
+    /** Quick spots keep the alpha the token already had. */
+    function setTokenColor(token, hex) {
+      var cur = currentColorFor(token)
+      setOverride(token, { hex: hex, a: cur.a == null ? 1 : cur.a })
+    }
+
+    function refreshCircles() {
+      QUICK_TOKENS.forEach(function (pair) {
+        var input = circleInputs[pair[0]]
+        if (input) input.value = currentColorFor(pair[0]).hex
+      })
+    }
+
+    function refreshKnobs() {
+      knobs.forEach(function (k) { k.render() })
     }
 
     /* ---- color row ---- */
@@ -1639,68 +2014,129 @@
     var presetsPane = pane('presets')
     var presetsGrid = el('div', { class: 'fbts-presets' })
     PRESETS.forEach(function (p) {
-      var swatchColors = presetSwatches(p)
       var card = el(
         'div',
         {
-          class: 'fbts-preset', 'data-preset': p.id,
+          class: 'fbts-preset', 'data-preset': p.id, title: 'Apply ' + p.label,
           onclick: function () {
             state.preset = p.id
             state.colors = {}
             commit('Applied ' + p.label)
           },
         },
-        [
-          el('div', { class: 'fbts-swatches' }, swatchColors.map(function (c) {
-            var s = el('span', { class: 'fbts-swatch' })
-            s.style.background = c
-            return s
-          })),
-          el('div', { class: 'fbts-preset-name', text: p.label }),
-        ],
+        [el('div', { class: 'fbts-thumb', style: thumbStyle(p) }, thumbParts()), el('div', { class: 'fbts-preset-name', text: p.label })],
       )
       presetsGrid.appendChild(card)
     })
-    presetsPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Presets' }),
-      presetsGrid,
-    ]))
-    var schemeRow = el('div', { class: 'fbts-row' }, [
-      el('div', { class: 'fbts-row-label', text: 'Color scheme' }),
-    ])
-    ;['auto', 'dark', 'light'].forEach(function (mode) {
-      schemeRow.appendChild(
-        el('button', {
-          class: 'fbts-btn', text: mode, 'data-scheme': mode,
-          onclick: function () {
-            state.scheme = mode === 'auto' ? '' : mode
-            document.documentElement.style.removeProperty('color-scheme')
-            commit('Scheme: ' + mode)
-          },
-        }),
+    presetsPane.appendChild(group('Presets', [presetsGrid], { scroll: true }))
+
+    /* Dials: they retune whatever palette is in use. */
+    var knobRow = el('div', { class: 'fbts-knobs' })
+    var knobs = []
+    ADJUST_DEFS.forEach(function (def) {
+      var k = knob(def)
+      knobs.push(k)
+      knobRow.appendChild(k.node)
+    })
+    presetsPane.appendChild(
+      group(
+        'Adjustments',
+        [
+          knobRow,
+          el('div', { class: 'fbts-note', text: 'Retunes the palette above. Drag a dial up or down, scroll on it, or use the arrow keys. Double-click resets one dial.' }),
+        ],
+        {
+          actions: [
+            headLink('Reset', 'Put every dial back', function () {
+              state.adjust = clone(DEFAULT_ADJUST)
+              commit('Adjustments reset')
+              refreshKnobs()
+            }),
+          ],
+        },
+      ),
+    )
+
+    /* Round spots for the colours people change most. */
+    var QUICK_TOKENS = [
+      ['--bg', 'Background'],
+      ['--surface', 'Surface'],
+      ['--chrome', 'Chrome'],
+      ['--text', 'Text'],
+      ['--muted', 'Muted text'],
+      ['--brand-2', 'Brand'],
+      ['--accent', 'Accent'],
+      ['--danger', 'Danger'],
+    ]
+    var circlesRow = el('div', { class: 'fbts-circles' })
+    var circleInputs = {}
+    QUICK_TOKENS.forEach(function (pair) {
+      var token = pair[0]
+      var input = el('input', { type: 'color', value: currentColorFor(token).hex })
+      input.addEventListener('input', function () { setTokenColor(token, input.value) })
+      input.addEventListener('contextmenu', function (e) {
+        e.preventDefault()
+        setOverride(token, null)
+        input.value = currentColorFor(token).hex
+        showToast('Reset ' + token)
+      })
+      circleInputs[token] = input
+      circlesRow.appendChild(
+        el('label', { class: 'fbts-circle', title: 'Click to pick a colour, right-click to reset' }, [
+          input,
+          el('span', { class: 'fbts-circle-label', text: pair[1] }),
+        ]),
       )
     })
-    presetsPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Appearance' }),
-      schemeRow,
-      el('div', { class: 'fbts-note', text: 'Presets set the full palette. Color scheme only tells the app how to render native controls and scrollbars.' }),
-    ]))
+    presetsPane.appendChild(
+      group('Quick colours', [circlesRow], {
+        actions: [
+          headLink('Reset', 'Clear these overrides', function () {
+            QUICK_TOKENS.forEach(function (pair) { setOverride(pair[0], null) })
+            refreshCircles()
+            showToast('Quick colours reset')
+          }),
+        ],
+      }),
+    )
+
+    /* Options: the app's own light/dark preference. */
+    var schemeRow = el('div')
+    ;[
+      ['auto', 'Auto - follow the system'],
+      ['dark', 'Dark mode'],
+      ['light', 'Light mode'],
+    ].forEach(function (pair) {
+      var input = el('input', { type: 'radio', name: 'fbts-scheme', value: pair[0], 'data-scheme': pair[0] })
+      input.addEventListener('change', function () {
+        state.scheme = pair[0] === 'auto' ? '' : pair[0]
+        document.documentElement.style.removeProperty('color-scheme')
+        commit('Scheme: ' + pair[0])
+      })
+      schemeRow.appendChild(el('label', { class: 'fbts-option' }, [input, el('span', { text: pair[1] })]))
+    })
+    presetsPane.appendChild(
+      group('Options', [
+        schemeRow,
+        el('div', { class: 'fbts-note', text: 'The look of native controls and scrollbars only. The palette above does not depend on it.' }),
+      ]),
+    )
 
     /* ---- Colors tab ---- */
     var colorsPane = pane('colors')
     colorsPane.appendChild(el('div', { class: 'fbts-note', text: 'Changes apply instantly and are saved automatically. \u21ba resets a single token.' }))
     var colorPanels = {}
 
-    GROUP_ORDER.forEach(function (group) {
+    GROUP_ORDER.forEach(function (groupName) {
       var tokens = CURATED.filter(function (x) {
-        return x.group === group
+        return x.group === groupName
       })
       if (!tokens.length) return
-      var isOpen = group === 'Surfaces' || group === 'Brand'
+      var isOpen = groupName === 'Surfaces' || groupName === 'Brand'
       var acc = el('div', { class: 'fbts-accordion' + (isOpen ? ' open' : '') })
       var headEl = el('div', { class: 'fbts-accordion-head' }, [
         el('span', { class: 'chev', text: '\u25b6' }),
-        el('span', { text: group }),
+        el('span', { text: groupName }),
         el('span', { class: 'grow', style: 'flex:1' }),
         el('span', { style: 'color:var(--fbts-faint);font-size:10px', text: String(tokens.length) }),
       ])
@@ -1713,7 +2149,7 @@
       acc.appendChild(headEl)
       acc.appendChild(bodyEl)
       colorsPane.appendChild(acc)
-      colorPanels[group] = { acc: acc, body: bodyEl, tokens: tokens }
+      colorPanels[groupName] = { acc: acc, body: bodyEl, tokens: tokens }
     })
 
     /* ---- Layout tab ---- */
@@ -1758,38 +2194,34 @@
       })
     }
 
-    layoutPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Corner radius' }),
-      el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
-        radiusPreset('Square', '0px'),
-        radiusPreset('Subtle', '6px'),
-        radiusPreset('Round', '12px'),
-        radiusPreset('Pill', '24px'),
+    layoutPane.appendChild(
+      group('Corner radius', [
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          radiusPreset('Square', '0px'),
+          radiusPreset('Subtle', '6px'),
+          radiusPreset('Round', '12px'),
+          radiusPreset('Pill', '24px'),
+        ]),
       ]),
-    ]))
-    layoutPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Text scale' }),
-      el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
-        fontScale(0.9), fontScale(1), fontScale(1.1), fontScale(1.2),
+    )
+    layoutPane.appendChild(
+      group('Text scale', [
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          fontScale(0.9), fontScale(1), fontScale(1.1), fontScale(1.2),
+        ]),
       ]),
-    ]))
-    layoutPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Typography' }),
-      layoutGroup('Fonts', ['--font-sans', '--font-mono']),
-      layoutGroup('Font sizes', FONT_TOKENS),
-    ]))
-    layoutPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Radii' }),
-      layoutGroup('Radius tokens', RADIUS_TOKENS),
-    ]))
-    layoutPane.appendChild(el('div', { class: 'fbts-section' }, [
-      el('div', { class: 'fbts-section-title', text: 'Dimensions' }),
-      layoutGroup('Sizing', SIZE_TOKENS),
-    ]))
+    )
+    layoutPane.appendChild(
+      group('Typography', [
+        layoutGroup('Fonts', ['--font-sans', '--font-mono']),
+        layoutGroup('Font sizes', FONT_TOKENS),
+      ]),
+    )
+    layoutPane.appendChild(group('Radii', [layoutGroup('Radius tokens', RADIUS_TOKENS)]))
+    layoutPane.appendChild(group('Dimensions', [layoutGroup('Sizing', SIZE_TOKENS)]))
 
     /* ---- Advanced tab ---- */
     var advPane = pane('advanced')
-    advPane.appendChild(el('div', { class: 'fbts-section-title', text: 'Raw CSS' }))
     var rawArea = el('textarea', { class: 'fbts-textarea', spellcheck: 'false', placeholder: '/* e.g. .composer { backdrop-filter: blur(20px); } */' })
     rawArea.value = state.raw || ''
     var rawTimer = null
@@ -1801,17 +2233,22 @@
         saveState(state)
       }, 250)
     })
-    advPane.appendChild(rawArea)
-    advPane.appendChild(el('div', { class: 'fbts-note', text: 'Injected as a <style> tag. Anything CSS can do, this can do.' }))
+    advPane.appendChild(
+      group('Raw CSS', [
+        rawArea,
+        el('div', { class: 'fbts-note', text: 'Injected as a <style> tag. Anything CSS can do, this can do.' }),
+      ]),
+    )
 
-    advPane.appendChild(el('div', { class: 'fbts-section', style: 'margin-top:16px' }, [
-      el('div', { class: 'fbts-section-title', text: 'All tokens' }),
-      el('div', { class: 'fbts-note', text: 'Every custom property Freebuff ships. Non-colour values are edited as text.' }),
-    ]))
     var search = el('input', { class: 'fbts-search', type: 'text', placeholder: 'Filter tokens\u2026' })
-    advPane.appendChild(search)
     var advList = el('div')
-    advPane.appendChild(advList)
+    advPane.appendChild(
+      group('All tokens', [
+        el('div', { class: 'fbts-note', style: 'margin:0 0 8px', text: 'Every custom property Freebuff ships. Non-colour values are edited as text.' }),
+        search,
+        advList,
+      ], { scroll: true }),
+    )
     var advRows = []
     ALL_TOKENS.forEach(function (name) {
       var meta = CURATED.filter(function (x) { return x.name === name })[0]
@@ -1836,8 +2273,7 @@
       // The name travels with the theme, so the generated boxes must follow it.
       refreshActive()
     })
-    ioPane.appendChild(el('div', { class: 'fbts-section-title', text: 'Theme name' }))
-    ioPane.appendChild(nameInput)
+    ioPane.appendChild(group('Theme name', [nameInput]))
 
     function copyText(text, okMessage) {
       if (!navigator.clipboard) {
@@ -1849,25 +2285,28 @@
 
     /* "This theme": generated output, kept in step with the live theme. */
     var exportArea = el('textarea', { class: 'fbts-textarea', spellcheck: 'false', readonly: 'readonly' })
-    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:14px', text: 'This theme' }))
-    ioPane.appendChild(exportArea)
-    ioPane.appendChild(el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:8px 0 0' }, [
-      el('button', {
-        class: 'fbts-btn primary', text: 'Save .fbtheme',
-        onclick: function () {
-          download(JSON.stringify(themeDocument(state), null, 2), themeFileName(state.name))
-          showToast('Saved ' + themeFileName(state.name))
-        },
-      }),
-      el('button', {
-        class: 'fbts-btn', text: 'Copy theme',
-        onclick: function () { copyText(exportArea.value, 'Theme JSON copied') },
-      }),
-      el('button', {
-        class: 'fbts-btn', text: 'Copy CSS',
-        onclick: function () { copyText(cssText(), 'CSS copied') },
-      }),
-    ]))
+    ioPane.appendChild(
+      group('This theme', [
+        exportArea,
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:8px 0 0' }, [
+          el('button', {
+            class: 'fbts-btn primary', text: 'Save .fbtheme',
+            onclick: function () {
+              download(JSON.stringify(themeDocument(state), null, 2), themeFileName(state.name))
+              showToast('Saved ' + themeFileName(state.name))
+            },
+          }),
+          el('button', {
+            class: 'fbts-btn', text: 'Copy theme',
+            onclick: function () { copyText(exportArea.value, 'Theme JSON copied') },
+          }),
+          el('button', {
+            class: 'fbts-btn', text: 'Copy CSS',
+            onclick: function () { copyText(cssText(), 'CSS copied') },
+          }),
+        ]),
+      ]),
+    )
 
     var shareInput = el('input', {
       class: 'fbts-search',
@@ -1876,15 +2315,18 @@
       style: 'font-family:var(--fbts-mono);font-size:11px',
       title: 'One line that carries the whole theme',
     })
-    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:16px', text: 'Share code' }))
-    ioPane.appendChild(el('div', { class: 'fbts-code-row' }, [
-      shareInput,
-      el('button', {
-        class: 'fbts-btn', text: 'Copy',
-        onclick: function () { copyText(shareInput.value, 'Share code copied') },
-      }),
-    ]))
-    ioPane.appendChild(el('div', { class: 'fbts-note', text: 'One line, so it survives being pasted into a chat or an issue.' }))
+    ioPane.appendChild(
+      group('Share code', [
+        el('div', { class: 'fbts-code-row' }, [
+          shareInput,
+          el('button', {
+            class: 'fbts-btn', text: 'Copy',
+            onclick: function () { copyText(shareInput.value, 'Share code copied') },
+          }),
+        ]),
+        el('div', { class: 'fbts-note', style: 'margin:0', text: 'One line, so it survives being pasted into a chat or an issue.' }),
+      ]),
+    )
 
     /* "Paste a theme": the editable box. Nothing overwrites this one. */
     var importArea = el('textarea', {
@@ -1893,8 +2335,6 @@
       style: 'min-height:104px',
       placeholder: 'Paste a share code, or the contents of a .fbtheme file.',
     })
-    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:18px', text: 'Open a theme' }))
-    ioPane.appendChild(importArea)
 
     var fileInput = el('input', { type: 'file', accept: '.fbtheme,.json,application/json', style: 'display:none' })
     fileInput.addEventListener('change', function () {
@@ -1902,27 +2342,65 @@
       fileInput.value = ''
       if (file) readThemeFile(file)
     })
-    ioPane.appendChild(fileInput)
 
-    ioPane.appendChild(el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:8px 0 0' }, [
-      el('button', {
-        class: 'fbts-btn primary', text: 'Import',
-        onclick: function () { importThemeFromText(importArea.value) },
-      }),
-      el('button', {
-        class: 'fbts-btn', text: 'Choose a file',
-        onclick: function () { fileInput.click() },
-      }),
-    ]))
-    ioPane.appendChild(el('div', { class: 'fbts-note', text: 'You can also drop a .fbtheme file anywhere on this page.' }))
+    ioPane.appendChild(
+      group('Open a theme', [
+        importArea,
+        fileInput,
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:8px 0 0' }, [
+          el('button', {
+            class: 'fbts-btn primary', text: 'Import',
+            onclick: function () { importThemeFromText(importArea.value) },
+          }),
+          el('button', {
+            class: 'fbts-btn', text: 'Choose a file',
+            onclick: function () { fileInput.click() },
+          }),
+        ]),
+        el('div', { class: 'fbts-note', text: 'You can also drop a .fbtheme file anywhere on this page.' }),
+      ]),
+    )
+
+    /*
+     * Two slots, like the A/B switch on a plugin. Each holds a whole theme, and
+     * every edit goes to whichever slot is showing, so a variant can be built
+     * without losing the version you started from.
+     */
+    var slots = { A: clone(state), B: clone(state) }
+    var activeSlot = 'B'
+
+    function useSlot(name) {
+      if (name === activeSlot) return
+      slots[activeSlot] = clone(state)
+      activeSlot = name
+      state = clone(slots[name])
+      state.adjust = normalizeAdjust(state.adjust)
+      applyState()
+      saveState(state, true)
+      rebuild()
+      showToast('Editing slot ' + name)
+    }
 
     /* ---- footer ---- */
-    var footer = el('div', { class: 'fbts-actions' }, [
+    var slotBar = el('div', { class: 'fbts-seg' })
+    ;['A', 'B'].forEach(function (name) {
+      slotBar.appendChild(
+        el('button', {
+          type: 'button', text: name, 'data-slot': name,
+          title: 'Slot ' + name + ' - two themes, one click apart',
+          onclick: function () { useSlot(name) },
+        }),
+      )
+    })
+    var footer = el('div', { class: 'fbts-footer' }, [
+      slotBar,
       el('button', {
         class: 'fbts-btn danger', text: 'Reset all',
         onclick: function () {
           resetAll()
+          slots[activeSlot] = clone(state)
           rebuild()
+          refreshKnobs()
           showToast('Reset to Freebuff defaults')
         },
       }),
@@ -1939,7 +2417,8 @@
     ])
 
     panel.appendChild(head)
-    panel.appendChild(el('div', { class: 'fbts-page-main' }, [tabsBar, body]))
+    panel.appendChild(tabsBar)
+    panel.appendChild(body)
     panel.appendChild(footer)
 
     document.addEventListener(
@@ -2015,23 +2494,19 @@
     })
 
     /* ---- refresh helpers ---- */
-    function presetSwatches(p) {
-      if (!p.colors) return ['#0a0a0a', '#1c1c1c', '#b5cea5', '#ebebeb']
-      return [p.colors['--bg'], p.colors['--surface'], p.colors['--brand'], p.colors['--text'], p.colors['--danger']]
-        .filter(Boolean)
-        .map(function (c) { return toCss(c) })
-    }
-
     function refreshActive() {
       // preset cards
       Array.prototype.forEach.call(presetsGrid.children, function (card) {
         card.classList.toggle('active', card.dataset.preset === state.preset)
       })
-      // scheme buttons
-      Array.prototype.forEach.call(schemeRow.querySelectorAll('[data-scheme]'), function (btn) {
-        var mode = btn.dataset.scheme
-        var active = mode === 'auto' ? !state.scheme : state.scheme === mode
-        btn.style.borderColor = active ? 'var(--fbts-accent)' : ''
+      // options
+      Array.prototype.forEach.call(schemeRow.querySelectorAll('[data-scheme]'), function (input) {
+        var mode = input.dataset.scheme
+        input.checked = mode === 'auto' ? !state.scheme : state.scheme === mode
+      })
+      // the A/B slots
+      Array.prototype.forEach.call(slotBar.children, function (btn) {
+        btn.classList.toggle('active', btn.dataset.slot === activeSlot)
       })
       // The generated boxes only; the import box belongs to whoever is typing.
       exportArea.value = JSON.stringify(themeDocument(state), null, 2)
@@ -2064,6 +2539,8 @@
       })
       rawArea.value = state.raw || ''
       nameInput.value = state.name || ''
+      refreshKnobs()
+      refreshCircles()
       refreshActive()
     }
 

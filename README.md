@@ -25,12 +25,18 @@ You do not need to know how to code to use it.
 - **15 ready-made themes**: Nord, Dracula, Tokyo Night, Gruvbox, One Dark, Catppuccin
   (dark and light), Rose Pine, Solarized Light, Cyberpunk, Matrix, Amber CRT, Vaporwave,
   Midnight Blue, High Contrast, and the original Freebuff look.
+- **A preview of every theme**: each one is drawn as a miniature of the Freebuff window
+  in its own colours, so you can pick by eye instead of by name.
+- **Dials** for hue, saturation, brightness, contrast and text, which retune the whole
+  palette at once when no preset is quite right.
 - **Full colour control**: change any of the 212 colours Freebuff uses, one by one.
 - **Layout control**: corner roundness, text size, fonts, and panel sizes.
 - **A raw CSS box** for anything the controls do not cover.
 - **A custom `.fbtheme` file** you can save, send to someone and open again, plus a
   one-line share code for pasting into a chat.
 - **Drag and drop**: drop a `.fbtheme` file on the page and it opens.
+- **A/B slots** in the bottom bar: two themes side by side, one click apart, so you can
+  compare a change against what you had.
 
 Your theme is remembered after you close and reopen Freebuff.
 
@@ -59,16 +65,37 @@ The window you see is only open for a few seconds; you can close it by pressing 
 ## How to use it
 
 Click the **palette icon** in the sidebar. The Theme Studio page fills the workspace area,
-with a list of sections down the left side.
+with five tabs across the top: **Presets**, **Colors**, **Layout**, **Advanced** and
+**Export**. Each tab is a stack of boxes, and each box holds one kind of control.
 
 ### Presets
 
-Click any theme to apply it instantly to the whole app. The one you are using is
-highlighted. Choose **Freebuff Default** to go back to the original colours.
+The first box is a scrollable wall of themes. Every card is a small drawing of the
+Freebuff window wearing that theme, with its name underneath. Click one to apply it to the
+whole app; the one in use is outlined. **Freebuff Default** puts the original colours back.
 
-Below the themes are three buttons, Auto, Dark and Light. These tell Freebuff how to
-draw things it controls itself, such as scrollbars and dropdown menus. Auto follows
-the theme you picked.
+**Adjustments** is a row of five dials that retune whatever palette is loaded:
+
+| Dial | What it does |
+| --- | --- |
+| Hue | Turns every colour around the colour wheel, up to half a turn either way |
+| Saturation | Makes the palette more colourful, or drains it towards grey |
+| Brightness | Lifts or lowers every colour |
+| Contrast | Pushes colours away from the middle, or towards it |
+| Text | Lifts or lowers text and muted text on their own |
+
+Drag a dial up or down, scroll on it, or click it and use the arrow keys. Hold `Shift`
+for bigger steps. Double-click a dial to put it back to the middle, or use **Reset** in the
+box header to reset all five at once.
+
+**Quick colours** puts the eight colours people change most often on round spots:
+background, surface, chrome, text, muted text, brand, accent and danger. Click a spot to
+pick a colour, or right-click it to hand that colour back to the preset. **Reset** clears
+all eight overrides.
+
+**Options** is the app's own light or dark preference. Auto, Dark and Light only tell
+Freebuff how to draw things it controls itself, such as scrollbars and dropdown menus.
+The palette above does not depend on it.
 
 ### Colors
 
@@ -101,8 +128,8 @@ Two things live here:
 
 1. **A raw CSS box.** If you know CSS, you can type any rules you like and they will be
    applied. This can change things the other sections do not reach.
-2. **A list of every colour Freebuff has.** There is a search box at the top. Use this
-   if you are looking for something specific.
+2. **A list of every colour Freebuff has.** There is a search box at the top and the list
+   scrolls on its own. Use this if you are looking for something specific.
 
 ### Export
 
@@ -131,6 +158,10 @@ Studio page. The page highlights the box and opens the theme.
 
 ### The bottom bar
 
+- **A** and **B** are two slots holding a whole theme each. **B** is where you are now.
+  Press **A** and you are looking at the other one; press **B** to come back. Every edit
+  goes to whichever slot is showing, so you can turn one into a variant and flick between
+  them without losing either.
 - **Reset all** puts everything back to the original Freebuff colours.
 - **Check for updates** asks GitHub whether a newer version of this tool exists.
 - The text on the right reminds you where to find this page again, and repeats that
