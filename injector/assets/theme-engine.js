@@ -16,9 +16,29 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.0.0'
+  var VERSION = '1.1.0'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
+
+  /* ------------------------------------------------------------------ *
+   * Update channel
+   *
+   * Freebuff's page CSP has no style-src and no default-src, so a remote
+   * stylesheet still loads - but connect-src blocks fetch() to GitHub. A
+   * stylesheet is enough though: the file below only *declares* the latest
+   * version as a custom property, and getComputedStyle() can read that even
+   * when the CSSOM of a cross-origin sheet is off limits. So the check needs
+   * neither CORS nor a proxy, and it degrades to silence if it ever fails.
+   * ------------------------------------------------------------------ */
+
+  var UPDATE_FEED = 'https://raw.githubusercontent.com/RichardFlp/freebuff-ui/main/update.css'
+  var RELEASES_URL = 'https://github.com/RichardFlp/freebuff-ui/releases/tag/v'
+  var UPDATE_PROBE = 'data-fbts-update-probe'
+  var REMOTE_VERSION_VAR = '--fbts-remote-version'
+  var SKIP_COOKIE = 'fbts_update_skip'
+  var CHECK_COOKIE = 'fbts_update_check'
+  var CHECK_INTERVAL = 6 * 60 * 60 * 1000
+  var CHECK_TIMEOUT = 6000
 
   var COOKIE_PREFIX = 'fbts_theme'
   var COOKIE_COUNT = 'fbts_theme_n'
@@ -751,6 +771,7 @@
   // Set by mount(): lets the sidebar button drive the page.
   var ui = null
   var railButton = null
+  var pagePanel = null
 
   var RAIL_ICON =
     '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -794,6 +815,8 @@
       requestAnimationFrame(function () {
         scheduled = false
         installRailButton()
+        // The shell may have re-laid itself out; keep the page on the frame.
+        fitPage()
       })
     }
     try {
@@ -801,6 +824,79 @@
     } catch (e) {}
     // Belt and braces: React can replace the rail wholesale on navigation.
     setInterval(installRailButton, 1500)
+  }
+
+  /*
+   * Where the page belongs.
+   *
+   * Freebuff renders its content inside `.workspace-frame`, which the shell
+   * insets by --shell-rail-width on the left and --shell-inset on the right and
+   * bottom, below a --tabbar-height tab row. Those three custom properties are
+   * declared on `.desktop-shell`, NOT on :root, and our shadow host is a child
+   * of <body> - so `var(--shell-rail-width)` inside the shadow root silently
+   * took its fallback (56px instead of 52px, 60px instead of 48px for the tab
+   * bar) and the page never lined up with the app's own views.
+   *
+   * Measuring the frame instead of recomputing the arithmetic also tracks
+   * compact mode, a collapsed sidebar, thread windows and future shell tweaks.
+   */
+  /** The biggest visible workspace box on the page (there is normally one). */
+  function workspaceBox() {
+    var best = null
+    var nodes = document.querySelectorAll('.workspace-frame, .settings-frame')
+    for (var i = 0; i < nodes.length; i++) {
+      var r = nodes[i].getBoundingClientRect()
+      if (r.width < 240 || r.height < 160) continue
+      if (!best || r.width * r.height > best.width * best.height)
+        best = { width: r.width, height: r.height, top: r.top, left: r.left, right: r.right, bottom: r.bottom }
+    }
+    return best
+  }
+
+  function measureWorkspace() {
+    var frame = workspaceBox()
+    if (frame) return frame
+    var shell = document.querySelector('.desktop-shell') || document.documentElement
+    var cs = getComputedStyle(shell)
+    var num = function (name, fallback) {
+      var v = parseFloat(cs.getPropertyValue(name))
+      return isFinite(v) ? v : fallback
+    }
+    var box = shell.getBoundingClientRect()
+    var bar = num('--tabbar-height', 48)
+    var rail = num('--shell-rail-width', 52)
+    var inset = num('--shell-inset', 8)
+    return {
+      top: box.top + bar,
+      left: box.left + rail,
+      right: box.right - inset,
+      bottom: box.bottom - inset,
+      corner: cs.getPropertyValue('--workspace-corner').trim(),
+    }
+  }
+
+  function fitToWorkspace(node) {
+    if (!node || !node.isConnected) return
+    var box = measureWorkspace()
+    var corner = box.corner
+    if (!corner) {
+      var shell = document.querySelector('.desktop-shell')
+      if (shell) {
+        try {
+          corner = getComputedStyle(shell).getPropertyValue('--workspace-corner').trim()
+        } catch (e) {}
+      }
+    }
+    node.style.top = Math.round(box.top) + 'px'
+    node.style.left = Math.round(box.left) + 'px'
+    node.style.right = Math.max(0, Math.round(window.innerWidth - box.right)) + 'px'
+    node.style.bottom = Math.max(0, Math.round(window.innerHeight - box.bottom)) + 'px'
+    // Match the workspace frame's rounded corners, whatever the shell uses.
+    node.style.borderRadius = corner || '18px'
+  }
+
+  function fitPage() {
+    fitToWorkspace(pagePanel)
   }
 
   /** Clicking any other rail icon means the user left our page. */
@@ -823,6 +919,7 @@
       for (var k in props) {
         if (k === 'class') node.className = props[k]
         else if (k === 'text') node.textContent = props[k]
+        else if (k === 'html') node.innerHTML = props[k]
         else if (k.indexOf('on') === 0 && typeof props[k] === 'function') node.addEventListener(k.slice(2), props[k])
         else if (k === 'style') node.style.cssText = props[k]
         else if (props[k] != null) node.setAttribute(k, props[k])
@@ -864,7 +961,16 @@
 
 .fbts-head { display: flex; align-items: center; gap: 10px; padding: 12px 12px 10px 14px; border-bottom: 1px solid var(--fbts-line); background: var(--fbts-panel2); }
 .fbts-title { font-size: 13px; font-weight: 700; letter-spacing: .01em; }
+.fbts-head-row { display: flex; align-items: center; gap: 8px; }
+.fbts-badge {
+  display: inline-flex; align-items: center; height: 17px; padding: 0 7px; flex: none;
+  border: 1px solid color-mix(in srgb, var(--fbts-ink) 20%, transparent); border-radius: 999px;
+  color: var(--fbts-mute); font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+}
 .fbts-sub { font-size: 10.5px; color: var(--fbts-faint); font-weight: 500; }
+.fbts-sub-sep { opacity: .5; padding: 0 3px; }
+.fbts-version { cursor: pointer; }
+.fbts-version:hover { color: var(--fbts-mute); text-decoration: underline; }
 .fbts-head .grow { flex: 1; }
 .fbts-x { width: 26px; height: 26px; border-radius: 8px; border: 1px solid var(--fbts-line); background: transparent; color: var(--fbts-mute); cursor: pointer; font-size: 14px; line-height: 1; }
 .fbts-x:hover { color: var(--fbts-ink); border-color: var(--fbts-accent); }
@@ -932,6 +1038,38 @@
   box-shadow: 0 12px 34px rgba(0,0,0,.6);
 }
 .fbts-toast.show { opacity: 1; transform: translateY(0); }
+
+/* ---- update chip + popup ---- */
+.fbts-update-chip {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2; pointer-events: auto; display: none;
+  align-items: center; gap: 7px; padding: 8px 13px 8px 10px;
+  border: 1px solid var(--fbts-line); border-radius: 999px; background: var(--fbts-panel2);
+  color: var(--fbts-ink); font-size: 11.5px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  box-shadow: 0 10px 30px rgba(0,0,0,.5);
+}
+.fbts-update-chip.show { display: inline-flex; }
+.fbts-update-chip:hover { border-color: var(--fbts-accent); }
+.fbts-update-chip svg { width: 15px; height: 15px; flex: none; color: var(--fbts-accent); }
+/* Keep clear of the page footer while Theme Studio is open. */
+.fbts-root.fbts-page-open .fbts-update-chip { right: 26px; bottom: 68px; }
+
+.fbts-modal-wrap {
+  position: fixed; inset: 0; z-index: 3; display: none; place-items: center; padding: 24px;
+  pointer-events: auto; background: rgba(0,0,0,.55);
+}
+.fbts-modal-wrap.show { display: grid; }
+.fbts-modal {
+  width: min(430px, calc(100vw - 48px)); padding: 18px 20px 16px;
+  border: 1px solid var(--fbts-line); border-radius: 16px; background: var(--fbts-panel);
+  color: var(--fbts-ink); box-shadow: 0 30px 90px rgba(0,0,0,.6);
+}
+.fbts-modal h3 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+.fbts-modal p { font-size: 11.5px; line-height: 1.6; color: var(--fbts-mute); margin-bottom: 9px; }
+.fbts-modal p:last-of-type { margin-bottom: 0; }
+.fbts-modal code { font-family: var(--fbts-mono); color: var(--fbts-ink); }
+.fbts-modal-match { margin: 12px 2px 0; font-size: 10.5px; color: var(--fbts-faint); }
+.fbts-modal-foot { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+.fbts-modal-foot .grow { flex: 1; }
 `
 
   /*
@@ -961,21 +1099,31 @@
 }
 
 .fbts-panel {
-  top: var(--tabbar-height, 44px);
-  left: var(--shell-rail-width, 56px);
-  right: 0;
-  bottom: 0;
+  position: fixed;
+  z-index: 1;
+  /*
+   * Fallbacks only. The shell defines --tabbar-height / --shell-rail-width /
+   * --shell-inset on .desktop-shell, not on :root, and this shadow host is a
+   * child of <body> - so it cannot inherit them and var() here would silently
+   * fall back. fitToWorkspace() measures the real workspace frame instead and
+   * writes the box as inline styles.
+   */
+  top: 48px;
+  left: 52px;
+  right: 8px;
+  bottom: 8px;
   width: auto;
   max-width: none;
   max-height: none;
   border: none;
-  border-radius: 0;
+  border-radius: 18px;
   box-shadow: none;
+  overflow: hidden;
   background: var(--fbts-bg);
 }
 
 .fbts-head {
-  padding: 16px 24px 14px;
+  padding: 18px 24px 14px;
   background: transparent;
   border-bottom: 1px solid var(--fbts-line);
 }
@@ -1049,13 +1197,201 @@
       }, 1900)
     }
 
-    var root = el('div', { class: 'fbts-root' }, [panel, toast])
+    /* ---- update chip + popup ---- */
+    var UPDATE_ICON =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+      'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M12 3.5v11"/><path d="M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 20h15"/></svg>'
+
+    var chipLabel = el('span', { text: 'Update' })
+    var chip = el(
+      'button',
+      {
+        class: 'fbts-update-chip',
+        type: 'button',
+        title: 'A newer version of Freebuff Theme Studio is available',
+        onclick: function () {
+          showUpdatePopup()
+        },
+      },
+      [el('span', { html: UPDATE_ICON }), chipLabel],
+    )
+
+    var modalBody = el('div', { class: 'fbts-modal' })
+    var modalWrap = el('div', { class: 'fbts-modal-wrap', onclick: function (e) { if (e.target === modalWrap) closePopup() } }, [modalBody])
+
+    var remoteVersion = ''
+    var checking = false
+
+    function showChip(version) {
+      chipLabel.textContent = 'Update ' + version
+      chip.classList.add('show')
+    }
+    function hideChip() {
+      chip.classList.remove('show')
+    }
+    function closePopup() {
+      modalWrap.classList.remove('show')
+    }
+
+    function openRelease(version) {
+      // Freebuff's main process denies off-origin popups and hands the URL to
+      // the system browser, so this never opens a second app window.
+      try {
+        window.open(RELEASES_URL + version, '_blank', 'noopener')
+      } catch (e) {}
+    }
+
+    function showUpdatePopup() {
+      if (!remoteVersion) return
+      modalBody.textContent = ''
+      modalBody.appendChild(el('h3', { text: 'Update available' }))
+      modalBody.appendChild(
+        el('p', {}, [
+          'Freebuff Theme Studio ',
+          el('code', { text: 'v' + remoteVersion }),
+          ' is out. You have ',
+          el('code', { text: 'v' + VERSION }),
+          '.',
+        ]),
+      )
+      modalBody.appendChild(
+        el('p', { text: 'Download the new installer from GitHub and run it the same way you installed this one. Your theme is kept.' }),
+      )
+      modalBody.appendChild(
+        el('p', { text: 'Update opens the release page in your browser - nothing is downloaded automatically. Press Esc to decide later.' }),
+      )
+      modalBody.appendChild(el('p', { class: 'fbts-modal-match', text: 'Unofficial extension - not made by Freebuff.' }))
+      modalBody.appendChild(
+        el('div', { class: 'fbts-modal-foot' }, [
+          el('button', {
+            class: 'fbts-btn primary',
+            type: 'button',
+            text: 'Update',
+            onclick: function () {
+              openRelease(remoteVersion)
+              closePopup()
+              hideChip()
+              showToast('Opening the release page')
+            },
+          }),
+          el('button', {
+            class: 'fbts-btn',
+            type: 'button',
+            text: 'Skip this version',
+            onclick: function () {
+              writeCookie(SKIP_COOKIE, remoteVersion, 365)
+              closePopup()
+              showChip(remoteVersion)
+              showToast('Update button moved to the corner')
+            },
+          }),
+        ]),
+      )
+      modalWrap.classList.add('show')
+    }
+
+    function isNewer(a, b) {
+      var pa = String(a).split('.')
+      var pb = String(b).split('.')
+      if (pa.length < 2) return false
+      for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+        var na = parseInt(pa[i], 10) || 0
+        var nb = parseInt(pb[i], 10) || 0
+        if (na !== nb) return na > nb
+      }
+      return false
+    }
+
+    var cleanVersion = function (v) {
+      return String(v == null ? '' : v).replace(/["'\s]/g, '')
+    }
+
+    /**
+     * The release feed is a stylesheet that only declares
+     * `--fbts-remote-version`. Reading it back through getComputedStyle works
+     * even cross-origin, and a missing or blocked feed just means silence.
+     */
+    function checkForUpdates(manual) {
+      if (checking || !document.head) return
+      var last = parseInt(readCookie(CHECK_COOKIE) || '0', 10)
+      if (!manual && Date.now() - last < CHECK_INTERVAL) return
+      checking = true
+      if (manual) showToast('Checking for updates\u2026')
+
+      var link = document.createElement('link')
+      link.rel = 'stylesheet'
+      link.href = UPDATE_FEED
+      var settled = false
+
+      function settle(version) {
+        if (settled) return
+        settled = true
+        checking = false
+        if (link.parentNode) link.parentNode.removeChild(link)
+        document.documentElement.removeAttribute(UPDATE_PROBE)
+        if (!version) {
+          if (manual) showToast('Could not check for updates')
+          return
+        }
+        writeCookie(CHECK_COOKIE, String(Date.now()), 365)
+        if (!isNewer(version, VERSION)) {
+          if (manual) showToast('You are on the latest version')
+          return
+        }
+        remoteVersion = version
+        // A skipped version stays skipped: it only leaves the corner button.
+        if (!manual && readCookie(SKIP_COOKIE) === version) {
+          showChip(version)
+          return
+        }
+        showUpdatePopup()
+      }
+
+      link.addEventListener('load', function () {
+        var value = ''
+        try {
+          value = getComputedStyle(document.documentElement).getPropertyValue(REMOTE_VERSION_VAR)
+        } catch (e) {}
+        settle(cleanVersion(value))
+      })
+      link.addEventListener('error', function () {
+        settle('')
+      })
+      setTimeout(function () {
+        settle('')
+      }, CHECK_TIMEOUT)
+
+      document.documentElement.setAttribute(UPDATE_PROBE, '')
+      document.head.appendChild(link)
+    }
+
+    var root = el('div', { class: 'fbts-root' }, [panel, toast, chip, modalWrap])
     shadow.appendChild(root)
 
     /* ---- header ---- */
-    var schemeLabel = el('div', { class: 'fbts-sub', text: 'v' + VERSION })
+    var schemeLabel = el('span', {
+      class: 'fbts-version',
+      title: 'Check for updates',
+      text: 'v' + VERSION,
+      onclick: function () { checkForUpdates(true) },
+    })
     var head = el('div', { class: 'fbts-head' }, [
-      el('div', {}, [el('div', { class: 'fbts-title', text: 'Theme Studio' }), schemeLabel]),
+      el('div', {}, [
+        el('div', { class: 'fbts-head-row' }, [
+          el('div', { class: 'fbts-title', text: 'Theme Studio' }),
+          el('span', {
+            class: 'fbts-badge',
+            title: 'A community extension. Not made by Freebuff.',
+            text: 'Unofficial',
+          }),
+        ]),
+        el('div', { class: 'fbts-sub' }, [
+          schemeLabel,
+          el('span', { class: 'fbts-sub-sep', text: '\u00b7' }),
+          el('span', { text: 'not made by Freebuff' }),
+        ]),
+      ]),
       el('div', { class: 'grow' }),
       el('button', { class: 'fbts-x', title: 'Close', text: '\u00d7', onclick: function () { panel.classList.remove('open') } }),
     ])
@@ -1447,11 +1783,15 @@
           showToast('Reset to Freebuff defaults')
         },
       }),
+      el('button', {
+        class: 'fbts-btn', text: 'Check for updates',
+        onclick: function () { checkForUpdates(true) },
+      }),
       el('div', { class: 'grow' }),
       el('span', {
         class: 'fbts-note',
         style: 'margin:0',
-        text: 'Reopen from the palette icon in the sidebar',
+        text: 'Unofficial community extension, not made by Freebuff.',
       }),
     ])
 
@@ -1466,9 +1806,15 @@
           e.preventDefault()
           togglePage()
         }
-        if (e.key === 'Escape' && panel.classList.contains('open')) {
-          e.preventDefault()
-          togglePage(false)
+        if (e.key === 'Escape') {
+          // Esc backs out of the popup first, then closes the page.
+          if (modalWrap.classList.contains('show')) {
+            e.preventDefault()
+            closePopup()
+          } else if (panel.classList.contains('open')) {
+            e.preventDefault()
+            togglePage(false)
+          }
         }
       },
       true,
@@ -1542,7 +1888,9 @@
 
     function togglePage(force) {
       var open = typeof force === 'boolean' ? force : !panel.classList.contains('open')
+      if (open) fitToWorkspace(panel)
       panel.classList.toggle('open', open)
+      root.classList.toggle('fbts-page-open', open)
       if (railButton) {
         if (open) {
           // Only one destination should look active: take the highlight off the
@@ -1560,14 +1908,48 @@
       if (open) refreshActive()
     }
 
-    ui = { toggle: togglePage, refresh: refreshActive }
+    ui = { toggle: togglePage, refresh: refreshActive, checkForUpdates: checkForUpdates }
 
     // The sidebar entry is the only entry point; watchRail() keeps re-attaching
     // it if React ever replaces the rail.
     installRailButton()
 
+    // Keep the page glued to the workspace frame: on window resize and whenever
+    // the shell decides to re-lay itself out (sidebar collapse, compact mode).
+    pagePanel = panel
+    fitToWorkspace(panel)
+    window.addEventListener('resize', fitPage)
+    try {
+      var frameEl = document.querySelector('.workspace-frame') || document.querySelector('.settings-frame')
+      new ResizeObserver(fitPage).observe(frameEl || document.documentElement)
+    } catch (e) {}
+
     selectTab('presets')
     refreshActive()
+
+    // One quiet check per session, well clear of the app's own startup work.
+    setTimeout(function () {
+      checkForUpdates(false)
+    }, 2500)
+
+    // Small surface for power users and for the sandbox tests.
+    window.__FREEBUFF_THEME_STUDIO_API__ = {
+      version: VERSION,
+      checkForUpdates: checkForUpdates,
+      state: function () {
+        return clone(state)
+      },
+      /** Pretend the update feed reported this version. */
+      simulateUpdate: function (v) {
+        remoteVersion = cleanVersion(v)
+        if (remoteVersion) showUpdatePopup()
+      },
+      /** Same, but a skipped version: it only shows the corner button. */
+      simulateChip: function (v) {
+        remoteVersion = cleanVersion(v)
+        showChip(remoteVersion)
+      },
+    }
   }
 
   /* ------------------------------------------------------------------ *

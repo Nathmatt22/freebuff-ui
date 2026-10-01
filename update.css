@@ -1,0 +1,21 @@
+/*
+ * Freebuff Theme Studio - update feed.
+ *
+ * The installed theme engine loads this file from
+ * https://raw.githubusercontent.com/RichardFlp/freebuff-ui/main/update.css
+ * once per session and compares the version below with its own.
+ *
+ * Why a stylesheet: Freebuff's page CSP allows remote stylesheets but blocks
+ * fetch() to anything outside 127.0.0.1 (connect-src), so this is the only
+ * channel the page can read on its own. The engine reads the declared custom
+ * property through getComputedStyle on <html>, which works cross-origin
+ * without CORS. Nothing here styles anything - it only declares a value.
+ *
+ * Bumping a release: put the new version in --fbts-remote-version and push it
+ * to main. Keep it in step with VERSION in injector/assets/theme-engine.js and
+ * `version` in injector/main.go.
+ */
+
+html[data-fbts-update-probe] {
+  --fbts-remote-version: "1.1.0";
+}

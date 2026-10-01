@@ -38,7 +38,7 @@ import (
 var engineJS []byte
 
 const (
-	version      = "1.0.0"
+	version      = "1.1.0"
 	markerStart  = "<!-- freebuff-theme-studio:start -->"
 	markerEnd    = "<!-- freebuff-theme-studio:end -->"
 	engineName   = "freebuff-theme-studio.js"
@@ -96,7 +96,8 @@ func initColors() {
 
 func banner() {
 	fmt.Printf("%s\n", colBold+"Freebuff Theme Studio"+colReset+" "+colDim+"v"+version+colReset)
-	fmt.Printf("%s\n\n", colDim+"Custom colour themes for Freebuff Desktop."+colReset)
+	fmt.Printf("%s\n", colDim+"Custom colour themes for Freebuff Desktop."+colReset)
+	fmt.Printf("%s\n\n", colDim+"Unofficial community extension - not made by Freebuff."+colReset)
 }
 
 func ok(msg string, a ...any) {
@@ -442,7 +443,7 @@ func main() {
 		banner()
 		fmt.Printf("Usage: %s [options]\n\n", filepath.Base(os.Args[0]))
 		fmt.Println("  Run with no options to install the theme panel into Freebuff Desktop.")
-		fmt.Println("  Then open Freebuff and click the \"Theme\" button in the bottom-right.")
+		fmt.Println("  Then open Freebuff and click the palette icon in its sidebar rail.")
 		fmt.Println()
 		flag.PrintDefaults()
 		fmt.Println()
@@ -474,7 +475,9 @@ func main() {
 		return
 
 	case *uninstallFlag:
-		step("Removing Theme Studio")
+		if !quiet {
+			step("Removing Theme Studio")
+		}
 		if err := uninstall(ui, quiet); err != nil {
 			warn("%v", err)
 			os.Exit(1)
@@ -530,11 +533,12 @@ func main() {
 		fmt.Println()
 		fmt.Printf("%sDone.%s\n", colBold+colGreen, colReset)
 		fmt.Println()
-		fmt.Println("  Open Freebuff - a " + colBold + "\"Theme\"" + colReset + " button appears in the bottom-right corner.")
+		fmt.Println("  Open Freebuff - a " + colBold + "palette icon" + colReset + " appears in the sidebar rail.")
 		fmt.Println("  Click it for presets, per-token colour pickers, layout and raw CSS.")
 		fmt.Println()
 		fmt.Printf("  %sThemes are saved in a cookie, so they survive restarts.%s\n", colDim, colReset)
-		fmt.Printf("  %sPress Ctrl+Alt+Shift+F to reopen the panel after hiding it.%s\n", colDim, colReset)
+		fmt.Printf("  %sCtrl+Alt+Shift+F reopens the page, Esc closes it.%s\n", colDim, colReset)
+		fmt.Printf("  %sUnofficial extension: not made by, or endorsed by, Freebuff.%s\n", colDim, colReset)
 		fmt.Println()
 	}
 

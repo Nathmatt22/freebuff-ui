@@ -2,6 +2,14 @@
 
 A colour theme editor for **Freebuff Desktop** for Windows.
 
+> **This is an unofficial extension.**
+> It is a community project. It is **not made by, affiliated with, or endorsed by
+> Freebuff** or its developers. Use it at your own risk, and please do not ask the
+> Freebuff team for support with it. Problems and ideas belong in this repository's
+> issue tracker.
+> The Theme Studio page repeats this in its header so nobody has to guess where it
+> came from.
+
 Once installed, Freebuff gets a new palette icon in its sidebar. Clicking it opens a
 Theme Studio page inside the app, where you can change every colour Freebuff uses,
 pick from ready-made themes, and save your own.
@@ -105,10 +113,34 @@ Give your theme a name, then use the buttons to save it or load one:
 ### The bottom bar
 
 - **Reset all** puts everything back to the original Freebuff colours.
-- The text on the right reminds you where to find this page again.
+- **Check for updates** asks GitHub whether a newer version of this tool exists.
+- The text on the right reminds you where to find this page again, and repeats that
+  this is an unofficial extension.
 
 Press `Esc` to leave the page. Clicking any other sidebar icon also leaves it.
 If you ever need to reopen it without the mouse, press `Ctrl+Alt+Shift+F`.
+
+---
+
+## Updating
+
+The tool checks GitHub for a newer release on its own, once per launch, and asks at most
+once every six hours. You can also ask it to check right away with **Check for updates**
+in the bottom bar of the page, or from the header version line.
+
+When a newer release exists, a small window appears with two choices:
+
+- **Update** opens the release page in your browser, where you can download the new
+  installer. Nothing is downloaded on its own, and your theme is not touched.
+- **Skip this version** closes the window and puts a small **Update** button in the
+  bottom-right corner instead. Click that button any time to see the window again.
+
+If you skip, the corner button stays for that version and the window does not come back
+on its own. The next release asks again. `Esc` closes the window without deciding, which
+is the same as choosing "later".
+
+To install the new version, run the new `FreebuffThemeInjector.exe` the same way you ran
+the first one. You do not need to remove anything first, and your theme is kept.
 
 ---
 
@@ -238,8 +270,43 @@ so Freebuff styles it and handles the active highlight. A `MutationObserver`, pl
 repeated check every 1.5 seconds, puts it back if Freebuff ever rebuilds that part of the
 interface.
 
-The page is positioned using Freebuff's own measurements, `--tabbar-height` and
-`--shell-rail-width`, so it lines up with the workspace area.
+The page is a full-window page, not a panel. Freebuff's own views live inside
+`.workspace-frame`, which the shell insets with `--shell-rail-width` on the left and
+`--shell-inset` on the right and bottom, below a `--tabbar-height` tab row. Those three
+properties are declared on `.desktop-shell`, not on `:root`, and the editor's shadow host
+is a child of `<body>`, so it cannot inherit them - reading them with `var()` silently
+fell back to the wrong numbers and the page never lined up.
+
+The editor therefore measures `.workspace-frame` itself and writes the result as inline
+styles, then keeps it in step with a `ResizeObserver` and a window resize listener. That
+survives compact mode, a collapsed sidebar, and Freebuff's separate thread windows.
+
+### How the update check works
+
+Freebuff's page policy allows remote stylesheets but blocks `fetch()` to anything outside
+`127.0.0.1`, so the page cannot call the GitHub API. Instead it loads
+[update.css](update.css) from this repository's `main` branch and reads one value out of
+it with `getComputedStyle`, which works for a cross-origin stylesheet without CORS.
+
+The file declares nothing but a version:
+
+```css
+html[data-fbts-update-probe] {
+  --fbts-remote-version: "1.1.0";
+}
+```
+
+If the file cannot be loaded - offline, GitHub down, or a future Freebuff policy that
+blocks it - the check fails quietly and nothing is shown.
+
+**Releasing a new version** means three edits, then a push:
+
+1. `VERSION` in `injector/assets/theme-engine.js`.
+2. `version` in `injector/main.go`.
+3. `--fbts-remote-version` in `update.css`.
+
+Then build, attach the new `.exe` to a `vX.Y.Z` release on GitHub, and push to `main`.
+Installed copies notice the new version within six hours of their next launch.
 
 ### Where your theme is stored
 
@@ -269,6 +336,7 @@ freebuff-theme-studio/
     assets/theme-engine.js     the editor page (the real source of truth)
   dist/
     FreebuffThemeInjector.exe  the built program
+  update.css                   the version the installed editor reads from main
   sandbox/
     demo.html                  a mock Freebuff shell for previewing the editor
     fake-install/              a fake Freebuff folder for testing the installer safely
@@ -297,4 +365,5 @@ python -m http.server 8199 --bind 127.0.0.1
 - A Freebuff update removes the palette icon, because it replaces the interface file.
   Running the installer again brings it back.
 - The editor also appears in Freebuff's separate thread windows, which is intended.
-- This is an unofficial tool. It is not made by Freebuff.
+- This is an unofficial tool, not made by Freebuff. The README says so at the top, the
+  Theme Studio header says so, and the installer prints it when it runs.
