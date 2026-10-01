@@ -63,12 +63,22 @@
         --font-size-heading: 20px;
         --font-weight-medium: 450;
         --font-weight-semibold: 600;
-        /* shell geometry the theme page anchors to (the app's real values) */
+        --focus-ring: color-mix(in srgb, var(--accent) 30%, transparent);
+      }
+      /*
+       * The real app declares its shell geometry here, on .desktop-shell, and
+       * NOT on :root. That is the whole reason "--workspace-corner" could not be
+       * themed: a declaration on the element that uses a token beats one
+       * inherited from <html>. The sandbox copies the real layout so this stays
+       * testable.
+       */
+      .desktop-shell {
+        position: fixed;
+        inset: 0;
         --shell-rail-width: 52px;
         --tabbar-height: 48px;
         --shell-inset: 8px;
         --workspace-corner: 18px;
-        --focus-ring: color-mix(in srgb, var(--accent) 30%, transparent);
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -130,6 +140,22 @@
         padding-right: var(--shell-inset);
         background: var(--shell-base);
       }
+      /*
+       * Window buttons, copied from the app's stylesheet. Note the colour:
+       * `var(--faint)`, and the close button's hardcoded #fff. There is no
+       * token for these, which is why the panel reaches them with a rule.
+       */
+      .window-controls {
+        display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: 8px;
+        padding-left: 8px; border-left: 1px solid var(--border); -webkit-app-region: no-drag;
+      }
+      .window-control {
+        display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+        padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--faint);
+      }
+      .window-control:hover { background: var(--surface); color: var(--text); }
+      .window-control-close:hover { background: var(--danger); color: #fff; }
+
       .tabbar {
         flex: 1;
         min-width: 0;
@@ -233,11 +259,17 @@
     </style>
   </head>
   <body>
+    <div class="desktop-shell">
     <div class="shell-tab-row">
       <div class="tabbar">
         <div class="tab active">app.tsx</div>
         <div class="tab">theme.ts</div>
         <div class="tab">+</div>
+        <div class="window-controls">
+          <button class="window-control" aria-label="Minimize">\u2013</button>
+          <button class="window-control" aria-label="Maximize">\u2610</button>
+          <button class="window-control window-control-close" aria-label="Close">\u00d7</button>
+        </div>
       </div>
     </div>
 
@@ -303,11 +335,14 @@
     </main>
     </div>
 
+    </div>
+
     <div class="banner">
       <b>Sandbox</b><br />
       Mock of the Freebuff shell - used only to preview the theme engine.
     </div>
 
+    <script src="/injector/assets/community-themes.js"></script>
     <script src="/injector/assets/theme-engine.js"></script>
   </body>
 </html>

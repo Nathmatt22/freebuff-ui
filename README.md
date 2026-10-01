@@ -34,7 +34,15 @@ https://github.com/user-attachments/assets/6c9b741f-3b19-4529-8625-d19bba4dfdb3
 - **Dials** for hue, saturation, brightness, contrast and text, which retune the whole
   palette at once when no preset is quite right.
 - **Full colour control**: change any of the 212 colours Freebuff uses, one by one.
+- **Gradients**: any surface can be a flat colour, a straight gradient or a radial one.
 - **Layout control**: corner roundness, text size, fonts, and panel sizes.
+- **Your own logo**: replace Freebuff's mark with an SVG, PNG or JPG.
+- **A background picture**, with fit, position, opacity and dimming. It travels inside
+  the theme file, so nothing needs hosting.
+- **Window buttons**: set the colour of the minimise, maximise and close buttons in the
+  corner, which follow the theme out of the box but can be overridden on their own.
+- **Community themes**: a tab of themes other people have made, and a one-click way to
+  send in your own.
 - **A raw CSS box** for anything the controls do not cover.
 - **A custom `.fbtheme` file** you can save, send to someone and open again, plus a
   one-line share code for pasting into a chat.
@@ -69,8 +77,11 @@ The window you see is only open for a few seconds; you can close it by pressing 
 ## How to use it
 
 Click the **palette icon** in the sidebar. The Theme Studio page fills the workspace area,
-with five tabs across the top: **Presets**, **Colors**, **Layout**, **Advanced** and
-**Export**. Each tab is a stack of boxes, and each box holds one kind of control.
+with seven tabs across the top: **Presets**, **Community**, **Colors**, **Layout**,
+**Logo and background**, **Advanced** and **Export**. Each tab is a stack of boxes, and
+each box holds one kind of control.
+
+Changes apply as you make them and are saved on their own. There is no save button.
 
 ### Presets
 
@@ -110,6 +121,13 @@ spot to hand that colour back straight away. A spot that you have changed keeps 
 around it, so you can see at a glance what you have overridden. **Reset** in the box header
 clears every spot override at once.
 
+The picker also has a **Fill** row. **Solid** is the normal flat colour; **Linear** and
+**Radial** turn the same thing into a gradient. A gradient has two stops, **A** and **B**,
+and the square, the hue strip and the opacity slider always edit whichever stop is
+selected, so changing the second colour is one click. **Angle** only shows for a linear
+fill. Anything you can put a colour on, you can put a gradient on: backgrounds, panels,
+chrome, borders, and the window buttons.
+
 A few spots cover more than one colour: Brand sets both brand shades, Background sets the
 app background and the workspace, and so on.
 
@@ -141,11 +159,57 @@ into the row.
 
 Changes appear as you make them. There is no save button.
 
+### Community
+
+Themes made by other people, shipped inside the extension. Each one is drawn as a
+miniature in its own colours; click it to apply it. Because a community theme replaces
+whatever you are editing, save yours first if you want to keep it.
+
+**Submit your own** is the same tab, further down: set the theme name, press **Save
+.fbtheme**, then press **Open the submission page**. That opens a GitHub form in your
+browser with the details already filled in - drag the `.fbtheme` file into the issue and
+press Submit. There is a **Copy share code** button too, if you would rather paste the
+theme into the issue instead of attaching a file.
+
+The list is a plain data file (`injector/assets/community-themes.js`), so a theme can also
+be sent as a pull request. Community themes ship with each release, which is why the tab
+works with no internet connection.
+
 ### Layout
 
 Rounding presets let you go from sharp square corners to very round ones. Text scale
 buttons resize all the text at once. Below those you can set the fonts and set exact
 sizes for individual elements.
+
+The rounding buttons set *every* corner Freebuff has, including the workspace box, the
+settings page and its cards, popups and the tab strip. **Square** also squares off the
+fully-round shapes such as avatars and pills; the other three leave those round, which is
+usually what you want. Every individual corner is listed under **Radii** if you would
+rather set them one at a time.
+
+### Logo and background
+
+**Freebuff logo** replaces the mark Freebuff draws on the new-thread screen, the loading
+screen, the splash and the project sidebar wordmark. Pick any SVG, PNG, JPG, GIF or WebP
+file. **Size** scales it and **Opacity** fades it - note that some of those places are
+watermarks that Freebuff draws very faint on purpose, so a replacement is faint there too.
+**Filter** takes any CSS filter, for example `invert(1)` to flip a black logo white.
+
+**Background picture** puts a picture behind the workspace, or behind the whole window if
+you set **Where** to *Whole window*. **Fit** decides whether it fills, fits, tiles or
+stretches; **Position** anchors it; **Opacity** lets the theme colour through and **Dim**
+adds a dark veil over it.
+
+The picture is stored inside the theme, so it is carried by a `.fbtheme` file and needs no
+hosting anywhere. The trade is size: a picture under about 200 KB keeps saving quick, and
+files up to 2 MB are accepted. If a theme gets too big to save, the panel says so instead
+of quietly failing.
+
+**Window buttons** are the minimise, maximise and close buttons in the top-right corner.
+They have no colour setting of their own in Freebuff - they just follow the theme's faint
+text colour - so this box exists to set them directly: the icon colour, the hover
+background and icon, and the close button's hover colours. Leave one alone (it shows
+*theme*) and it keeps following the theme.
 
 ### Advanced
 
@@ -199,9 +263,14 @@ If you ever need to reopen it without the mouse, press `Ctrl+Alt+Shift+F`.
 
 ## Updating
 
-The tool checks GitHub for a newer release on its own, once per launch, and asks at most
-once every six hours. You can also ask it to check right away with **Check for updates**
-in the bottom bar of the page, or from the header version line.
+The tool checks for a newer release on its own, at most once an hour, and keeps checking
+while it is open. You can also ask it to check right away with **Check for updates** in the
+bottom bar of the page, or by clicking the version line in the header.
+
+The version line doubles as the status: `v1.3.0 · Tokyo Night` is normal, `checking…`
+means a check is running, and `offline` means none of the three mirrors could be reached -
+click it to try again. A manual check always reports back, either with the update window
+or with a short "You are on the latest version" message.
 
 When a newer release exists, a small window appears with two choices:
 
@@ -230,10 +299,27 @@ A theme file is a small text file like this:
   "preset": "midnight",
   "colors": { "--brand-2": { "hex": "#5b8cff", "a": 1 } },
   "layout": { "--radius-md": "12px" },
+  "gradients": {
+    "--workspace-surface": {
+      "type": "linear", "angle": 160,
+      "from": { "hex": "#101018", "a": 1 },
+      "to": { "hex": "#1d1d33", "a": 1 }
+    }
+  },
+  "background": {
+    "image": "data:image/png;base64,...",
+    "fit": "cover", "position": "center", "opacity": 0.8, "dim": 0.4, "whole": false
+  },
+  "logo": { "image": "data:image/svg+xml,...", "size": 1, "opacity": 1, "filter": "" },
+  "window": { "ink": "", "hoverBg": "", "hoverInk": "", "closeBg": "", "closeInk": "" },
   "raw": "",
   "scheme": ""
 }
 ```
+
+Every section is optional, so files written by older versions still open. The `background`
+and `logo` images are inline data URLs, which is what makes a theme with a picture in it a
+single self-contained file.
 
 A `.fbtheme` file is that theme inside a small wrapper, so the file can say what it is:
 
@@ -284,6 +370,17 @@ creates duplicates.
 **I want to start over.**
 Use **Reset all** in the bottom bar of the page.
 
+**My theme is there but the window buttons / logo / background do not look right.**
+Check the **Logo and background** tab first: each group has a **Reset** in its header
+that hands that part back to the theme.
+
+**My theme did not come back after a restart.**
+Press `Ctrl+R` and check again. Freebuff picks a different local port every time it
+starts, so anything the page can only see from one port is gone - which is why themes are
+saved in the browser's cookie store for Freebuff itself rather than in page storage.
+If a theme is very large (a big background picture), saving can be refused; the panel says
+so when it happens.
+
 **Something looks broken and I want it gone.**
 Run `FreebuffThemeInjector.exe --uninstall`. This always works, even if the page itself
 will not load.
@@ -333,12 +430,13 @@ Freebuff Desktop is an Electron app. Its window loads a web page from a small lo
 web server that runs on your machine, and that server reads its interface files straight
 from disk every time the page loads.
 
-That gives a clean place to hook in. The installer changes exactly two files inside the
+That gives a clean place to hook in. The installer changes exactly these inside the
 Freebuff folder:
 
 ```
-resources/orchestrator/ui/index.html                        adds one script tag
-resources/orchestrator/ui/assets/freebuff-theme-studio.js   the theme editor
+resources/orchestrator/ui/index.html                          adds two script tags
+resources/orchestrator/ui/assets/freebuff-theme-studio.js     the theme editor
+resources/orchestrator/ui/assets/freebuff-theme-community.js  the community theme list
 ```
 
 It does not modify `app.asar` and it does not patch any binary. A copy of the original
@@ -352,6 +450,15 @@ Freebuff's entire look is built from 212 CSS custom properties, names like `--bg
 on the page's root element, which overrides every stylesheet rule the app ships. Because
 many of the app's colours are defined in terms of others, changing a few of them updates
 a great deal of the interface automatically.
+
+Inline styles on `<html>` reach everything that reads a token from `:root`, but not the
+handful of tokens the app redeclares further down its own tree - `--workspace-corner`,
+`--shell-inset`, `--tabbar-height` and the settings page radii among them. A declaration
+on the element that uses a token beats one inherited from an ancestor, so those could not
+be themed from the root at all. The editor therefore also writes a `<style>` element into
+`<head>`, with those tokens set `!important` on a selector list covering every element the
+app does this to. The same sheet carries the things that are properties rather than custom
+properties: the window buttons, the logo and the background picture.
 
 The editor page itself is rendered in a shadow DOM, so Freebuff's styles cannot affect it,
 but it reads its own colours from the app's properties. The result is that the editor is
@@ -391,19 +498,23 @@ html[data-fbts-update-probe] {
 }
 ```
 
-The editor asks for it through `cdn.jsdelivr.net`, which is a read-only mirror of this
-repository's `main` branch. `raw.githubusercontent.com` cannot be used for this: it serves
-CSS as `text/plain` with `X-Content-Type-Options: nosniff`, and a browser refuses to apply
-a cross-origin stylesheet that is not `text/css`. jsDelivr serves the same file as
+The editor asks for it through jsDelivr, which is a read-only mirror of this repository's
+`main` branch. `raw.githubusercontent.com` cannot be used for this: it serves CSS as
+`text/plain` with `X-Content-Type-Options: nosniff`, and a browser refuses to apply a
+cross-origin stylesheet that is not `text/css`. jsDelivr serves the same file as
 `text/css`, so no CORS and no extra hosting are needed.
+
+The same path is tried on all three of jsDelivr's edge networks - `cdn`, `fastly` and
+`gcore` - in turn, so one dead CDN no longer means the check goes quiet for good.
 
 jsDelivr sends `max-age=604800` for browser caches, so the request carries a per-hour query
 string. jsDelivr ignores query strings for its own cache, so this only stops a browser from
-holding a stale copy for a week; a check at most every six hours therefore always gets a
+holding a stale copy for a week; a check at most once an hour therefore always gets a
 current answer, within an hour of any change.
 
-If the file cannot be loaded - offline, CDN trouble, or a future Freebuff policy that
-blocks it - the check fails quietly and nothing is shown.
+If every mirror fails - offline, CDN trouble, or a future Freebuff policy that blocks
+stylesheets - the version line in the header reads `offline` rather than failing silently,
+and clicking it tries again.
 
 **Releasing a new version** means three edits, a push, and one cache purge:
 
@@ -420,13 +531,31 @@ curl https://purge.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css
 
 Without the purge the CDN keeps serving the old feed for up to twelve hours (`s-maxage`),
 which is the one thing that should never be stale. Installed copies then notice the new
-version on their next check, at most six hours later.
+version on their next check, at most an hour later.
 
 ### Where your theme is stored
 
-In a cookie. Freebuff chooses a new port every time it starts, and browser storage is tied
+In cookies. Freebuff chooses a new port every time it starts, and browser storage is tied
 to the combination of address and port, so ordinary storage would be lost on every restart.
 Cookies are tied to the address only, so they survive.
+
+A theme can be larger than one cookie, so it is spread over a numbered series -
+`fbts_theme_0`, `fbts_theme_1`, … - with `fbts_theme_n` saying how many to expect. The
+payload is base64url-encoded before it is split, which looks wasteful (it adds a third)
+and is not: the naive approach was to chunk the JSON itself, and because a browser escapes
+`"`, `{`, `}` and `:` when it stores a cookie value, a 3200-character chunk landed around
+6000 bytes, over the 4096-byte cookie limit, and was dropped without a word. The counter
+cookie still said how many chunks to expect, so the next load found one missing and quietly
+fell back to nothing. Base64url uses only unescaped characters, so a 3800-character chunk
+is exactly 3800 bytes.
+
+A background picture is far too big for that, so it lives in its own series (`fbts_img_0`,
+…, `fbts_img_n`). Keeping it separate means changing a colour does not rewrite the picture.
+
+Writes are throttled: the first edit after a pause is written at once, and a long drag is
+written at least every 1.5 seconds - the old version reset its timer on every change, so a
+continuous drag saved nothing at all until the mouse stopped. The page also flushes on
+being hidden or closed.
 
 ### Building from source
 
@@ -448,6 +577,7 @@ freebuff-theme-studio/
     main.go                    finds Freebuff, installs, checks, uninstalls
     go.mod
     assets/theme-engine.js     the editor page (the real source of truth)
+    assets/community-themes.js the bundled community themes (data only)
   dist/
     FreebuffThemeInjector.exe  the built program
   update.css                   the version the installed editor reads from main
@@ -482,5 +612,10 @@ python -m http.server 8199 --bind 127.0.0.1
 - This is an unofficial tool, not made by Freebuff. The README says so at the top, the
   Theme Studio header says so, and the installer prints it when it runs.
 - The update check is the only thing here that talks to the internet, and it only fetches
-  a 900-byte file from `cdn.jsdelivr.net` once a day at most. It sends nothing about you
-  or your Freebuff install. Skipping a version is remembered in a cookie, never online.
+  a 900-byte file from jsDelivr, at most once an hour. It sends nothing about you or your
+  Freebuff install. Skipping a version is remembered in a cookie, never online.
+- A background picture and a custom logo are stored inline in the theme, so a `.fbtheme`
+  file containing one is self-contained but bigger. Under about 200 KB keeps everything
+  quick.
+- Community themes are bundled with each release rather than downloaded, so that tab needs
+  no network and cannot break if a CDN does.

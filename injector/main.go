@@ -8,10 +8,11 @@
 // from the document it just read - so an extra same-origin <script> is allowed
 // and takes effect on the next page load.
 //
-// We therefore only ever touch two files inside the install:
+// We therefore only ever touch these files inside the install:
 //
-//	resources/orchestrator/ui/index.html              (+ injected <script> tag)
+//	resources/orchestrator/ui/index.html                        (+ injected <script> tags)
 //	resources/orchestrator/ui/assets/freebuff-theme-studio.js   (the engine)
+//	resources/orchestrator/ui/assets/freebuff-theme-community.js (community theme list)
 //
 // Nothing is patched in app.asar and no binary is modified.
 package main
@@ -37,14 +38,18 @@ import (
 //go:embed assets/theme-engine.js
 var engineJS []byte
 
+//go:embed assets/community-themes.js
+var communityJS []byte
+
 const (
-	version      = "1.2.1"
-	markerStart  = "<!-- freebuff-theme-studio:start -->"
-	markerEnd    = "<!-- freebuff-theme-studio:end -->"
-	engineName   = "freebuff-theme-studio.js"
-	defaultName  = "freebuff-theme-default.js"
-	backupSuffix = ".freebuff-theme-original.bak"
-	manifestName = ".freebuff-theme-studio.json"
+	version       = "1.3.0"
+	markerStart   = "<!-- freebuff-theme-studio:start -->"
+	markerEnd     = "<!-- freebuff-theme-studio:end -->"
+	engineName    = "freebuff-theme-studio.js"
+	communityName = "freebuff-theme-community.js"
+	defaultName   = "freebuff-theme-default.js"
+	backupSuffix  = ".freebuff-theme-original.bak"
+	manifestName  = ".freebuff-theme-studio.json"
 )
 
 var (
@@ -243,6 +248,9 @@ func scriptBlock(ui string) string {
 	if _, err := os.Stat(filepath.Join(assetsDir(ui), defaultName)); err == nil {
 		b.WriteString(`  <script src="./assets/` + defaultName + `"></script>` + nl)
 	}
+	// The community list is a plain data file and must be loaded first: the
+	// engine reads it while it builds the Community tab.
+	b.WriteString(`  <script src="./assets/` + communityName + `"></script>` + nl)
 	b.WriteString(`  <script src="./assets/` + engineName + `" data-freebuff-theme-studio="` + version + `"></script>` + nl)
 	b.WriteString(markerEnd)
 	return b.String()
@@ -294,6 +302,9 @@ func inject(ui string, quiet bool) error {
 	}
 	if err := os.WriteFile(filepath.Join(assetsDir(ui), engineName), engineJS, 0o644); err != nil {
 		return fmt.Errorf("writing engine: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(assetsDir(ui), communityName), communityJS, 0o644); err != nil {
+		return fmt.Errorf("writing community themes: %w", err)
 	}
 	if err := os.WriteFile(idx, []byte(updated), 0o644); err != nil {
 		return fmt.Errorf("writing index.html: %w", err)
@@ -367,10 +378,11 @@ func uninstall(ui string, quiet bool) error {
 		}
 	}
 	_ = os.Remove(filepath.Join(assetsDir(ui), engineName))
+	_ = os.Remove(filepath.Join(assetsDir(ui), communityName))
 	_ = os.Remove(filepath.Join(assetsDir(ui), defaultName))
 	_ = os.Remove(manifestPath(ui))
 	if !quiet {
-		ok("Removed injected script tag, engine and manifest")
+		ok("Removed injected script tags, engine and manifest")
 	}
 	if b, err := os.ReadFile(backupPath(ui)); err == nil {
 		if err := os.WriteFile(idx, b, 0o644); err != nil {
@@ -531,6 +543,7 @@ func main() {
 	if !quiet {
 		ok("Injected into resources/orchestrator/ui/index.html")
 		ok("Wrote assets/%s (%d bytes)", engineName, len(engineJS))
+		ok("Wrote assets/%s (%d bytes)", communityName, len(communityJS))
 	}
 
 	if *openFlag {

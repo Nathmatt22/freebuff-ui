@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.2.1'
+  var VERSION = '1.3.0'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -36,21 +36,56 @@
    * not text/css. jsDelivr sends text/css, and it is the same GitHub file.
    * ------------------------------------------------------------------ */
 
-  var UPDATE_FEED = 'https://cdn.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css'
+  /*
+   * The same file on jsDelivr's three edge networks. They are the same content
+   * behind the same path, but they fail independently, so one dead CDN no
+   * longer means the update check goes quiet for good.
+   */
+  var FEED_PATH = '/gh/RichardFlp/freebuff-ui@main/update.css'
+  var FEED_HOSTS = ['https://cdn.jsdelivr.net', 'https://fastly.jsdelivr.net', 'https://gcore.jsdelivr.net']
+  var UPDATE_FEED = FEED_HOSTS[0] + FEED_PATH
   var RELEASES_URL = 'https://github.com/RichardFlp/freebuff-ui/releases/tag/v'
   var UPDATE_PROBE = 'data-fbts-update-probe'
   var REMOTE_VERSION_VAR = '--fbts-remote-version'
   var SKIP_COOKIE = 'fbts_update_skip'
   var CHECK_COOKIE = 'fbts_update_check'
-  var CHECK_INTERVAL = 6 * 60 * 60 * 1000
-  var CHECK_TIMEOUT = 6000
+  var CHECK_SEEN_COOKIE = 'fbts_update_seen'
+  // Hourly, not six-hourly: the old interval plus a once-per-session check
+  // meant a release could sit unnoticed for most of a day.
+  var CHECK_INTERVAL = 60 * 60 * 1000
+  var CHECK_POLL = 20 * 60 * 1000
+  var CHECK_TIMEOUT = 8000
 
   var COOKIE_PREFIX = 'fbts_theme'
   var COOKIE_COUNT = 'fbts_theme_n'
   var LS_KEY = 'freebuff-theme-studio:v1'
   var RAW_STYLE_ID = 'freebuff-theme-studio-raw'
-  var COOKIE_CHUNK = 3200
+  var PAGE_STYLE_ID = 'freebuff-theme-studio-page'
   var COOKIE_DAYS = 3650
+
+  /*
+   * Cookie chunking, and why the sizes look the way they do.
+   *
+   * A browser refuses any cookie whose whole name+value+attributes exceed
+   * 4096 bytes, and it does so silently. The old code chunked the raw JSON at
+   * 3200 characters, which looked safe and was not: encodeURIComponent turns
+   * every `"`, `{`, `}` and `:` into three bytes, so a JSON chunk of 3200
+   * characters lands around 6000 bytes encoded and gets thrown away. The
+   * counter cookie still said how many chunks to expect, the next load could
+   * not find one of them, and the theme came back unchanged - which is exactly
+   * the "saving does not work" report.
+   *
+   * So the payload is base64url-encoded before it is chunked. Base64url uses
+   * only A-Z a-z 0-9 - and _, none of which encodeURIComponent touches, so the
+   * encoded length equals the raw length and a 3800-character chunk is really
+   * 3800 bytes. Base64 grows the payload by a third, which is a fine price for
+   * knowing exactly how big it will be.
+   */
+  var COOKIE_CHUNK = 3800
+  var COOKIE_MAX_THEME_CHUNKS = 24
+  var IMG_PREFIX = 'fbts_img'
+  var IMG_COUNT = 'fbts_img_n'
+  var COOKIE_MAX_IMAGE_CHUNKS = 80
 
   /* ------------------------------------------------------------------ *
    * Token registry
@@ -709,12 +744,26 @@
    * State + persistence
    * ------------------------------------------------------------------ */
 
+  /*
+   * A background picture. `image` is a data URL so it travels inside the theme
+   * file and needs no hosting; the rest is how it is painted.
+   */
+  var DEFAULT_BACKGROUND = { image: '', fit: 'cover', position: 'center', opacity: 1, dim: 0, whole: false }
+  /* A replacement mark for Freebuff's own, as an SVG, PNG or JPEG data URL. */
+  var DEFAULT_LOGO = { image: '', size: 1, opacity: 1, filter: '' }
+  /* The minimise / maximise / close buttons. '' means "leave it to the theme". */
+  var DEFAULT_WINDOW = { ink: '', hoverBg: '', hoverInk: '', closeBg: '', closeInk: '' }
+
   var DEFAULT_STATE = {
     v: 1,
     name: 'Custom',
     preset: 'default',
     colors: {},
     layout: {},
+    gradients: {},
+    background: clone(DEFAULT_BACKGROUND),
+    logo: clone(DEFAULT_LOGO),
+    window: clone(DEFAULT_WINDOW),
     raw: '',
     scheme: '',
     adjust: clone(DEFAULT_ADJUST),
@@ -724,6 +773,58 @@
     return JSON.parse(JSON.stringify(o))
   }
 
+  /**
+   * Only accept an inline image data URL.
+   *
+   * A remote URL would be a fetch the page cannot make (connect-src blocks it),
+   * and a data:text/html URL would be an injection. SVG is allowed because it is
+   * the format people will actually want for a logo, but a script inside one is
+   * not.
+   */
+  function cleanDataUrl(v) {
+    var s = typeof v === 'string' ? v.trim() : ''
+    if (!s) return ''
+    if (!/^data:image\/(png|jpe?g|gif|webp|avif|svg\+xml)[;,]/i.test(s)) return ''
+    if (/^data:image\/svg\+xml/i.test(s)) {
+      var head = s.slice(0, 4000)
+      var decoded = head
+      try {
+        decoded = decodeURIComponent(head)
+      } catch (e) {}
+      if (/<script/i.test(decoded) || /on\w+\s*=/i.test(decoded)) return ''
+    }
+    return s
+  }
+
+  function num(v, lo, hi, fallback) {
+    var n = Number(v)
+    if (!isFinite(n)) return fallback
+    return Math.min(hi, Math.max(lo, n))
+  }
+
+  function oneOf(v, list, fallback) {
+    return list.indexOf(v) >= 0 ? v : fallback
+  }
+
+  function normalizeGradients(raw) {
+    var out = {}
+    if (!raw || typeof raw !== 'object') return out
+    for (var k in raw) {
+      var g = raw[k]
+      if (!g || typeof g !== 'object') continue
+      var from = parseColor(g.from && g.from.hex) ? { hex: parseColor(g.from.hex).hex, a: num(g.from.a, 0, 1, 1) } : null
+      var to = parseColor(g.to && g.to.hex) ? { hex: parseColor(g.to.hex).hex, a: num(g.to.a, 0, 1, 1) } : null
+      if (!from || !to) continue
+      out[k] = {
+        type: oneOf(g.type, ['linear', 'radial'], 'linear'),
+        angle: num(g.angle, 0, 360, 160),
+        from: from,
+        to: to,
+      }
+    }
+    return out
+  }
+
   function normalizeState(raw) {
     var s = clone(DEFAULT_STATE)
     if (raw && typeof raw === 'object') {
@@ -731,6 +832,34 @@
       if (raw.preset) s.preset = String(raw.preset)
       if (raw.colors && typeof raw.colors === 'object') s.colors = raw.colors
       if (raw.layout && typeof raw.layout === 'object') s.layout = raw.layout
+      s.gradients = normalizeGradients(raw.gradients)
+      if (raw.background && typeof raw.background === 'object') {
+        var b = raw.background
+        s.background = {
+          image: cleanDataUrl(b.image),
+          fit: oneOf(b.fit, ['cover', 'contain', 'tile', 'stretch'], 'cover'),
+          position: oneOf(b.position, ['center', 'top', 'bottom', 'left', 'right'], 'center'),
+          opacity: num(b.opacity, 0, 1, 1),
+          dim: num(b.dim, 0, 0.9, 0),
+          whole: !!b.whole,
+        }
+      }
+      if (raw.logo && typeof raw.logo === 'object') {
+        s.logo = {
+          image: cleanDataUrl(raw.logo.image),
+          size: num(raw.logo.size, 0.25, 3, 1),
+          opacity: num(raw.logo.opacity, 0, 1, 1),
+          filter: typeof raw.logo.filter === 'string' ? raw.logo.filter.slice(0, 120) : '',
+        }
+      }
+      if (raw.window && typeof raw.window === 'object') {
+        var w = {}
+        for (var wk in DEFAULT_WINDOW) {
+          var wv = raw.window[wk]
+          w[wk] = wv ? toCss(parseColor(wv) || { hex: '#000000', a: 1 }) : ''
+        }
+        s.window = w
+      }
       if (typeof raw.raw === 'string') s.raw = raw.raw
       if (raw.scheme) s.scheme = String(raw.scheme)
       s.adjust = normalizeAdjust(raw.adjust)
@@ -836,7 +965,16 @@
     if (s.raw) out.raw = s.raw
     if (s.scheme) out.scheme = s.scheme
     if (!adjustIsDefault(s.adjust)) out.adjust = normalizeAdjust(s.adjust)
+    if (s.gradients && Object.keys(s.gradients).length) out.gradients = s.gradients
+    if (s.logo && s.logo.image) out.logo = s.logo
+    if (s.background && s.background.image) out.background = s.background
+    if (s.window && windowIsSet(s.window)) out.window = s.window
     return SHARE_PREFIX + toBase64Url(JSON.stringify(out))
+  }
+
+  function windowIsSet(w) {
+    for (var k in DEFAULT_WINDOW) if (w[k]) return true
+    return false
   }
 
   function themeFileName(name) {
@@ -861,52 +999,128 @@
     document.cookie = name + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax'
   }
 
+  /**
+   * Write a base64url payload across the named cookie series. Returns false
+   * when it does not fit, so the caller can say so instead of pretending.
+   */
+  function writeSeries(prefix, countName, b64, maxChunks) {
+    var chunks = []
+    for (var p = 0; p < b64.length; p += COOKIE_CHUNK) chunks.push(b64.slice(p, p + COOKIE_CHUNK))
+    if (b64.length && chunks.length > maxChunks) return false
+    var prev = parseInt(readCookie(countName) || '0', 10)
+    for (var i = 0; i < prev; i++) eraseCookie(prefix + '_' + i)
+    eraseCookie(prefix)
+    // Publish the count first: a half-written series then reads as absent
+    // rather than as a truncated theme, so a crash mid-save cannot brick the
+    // panel into showing garbage.
+    writeCookie(countName, '0', COOKIE_DAYS)
+    chunks.forEach(function (c, idx) {
+      writeCookie(prefix + '_' + idx, c, COOKIE_DAYS)
+    })
+    writeCookie(countName, String(chunks.length), COOKIE_DAYS)
+    return true
+  }
+
+  function readSeries(prefix, countName) {
+    var n = parseInt(readCookie(countName) || '0', 10)
+    if (!(n > 0)) return null
+    var parts = []
+    for (var i = 0; i < n; i++) {
+      var c = readCookie(prefix + '_' + i)
+      if (c === null) return null
+      parts.push(c)
+    }
+    return parts.join('')
+  }
+
   function saveToCookies(payload) {
     try {
-      // clear previous chunks
-      var prev = parseInt(readCookie(COOKIE_COUNT) || '0', 10)
-      for (var i = 0; i < prev; i++) eraseCookie(COOKIE_PREFIX + '_' + i)
-      eraseCookie(COOKIE_PREFIX)
-      var chunks = []
-      for (var p = 0; p < payload.length; p += COOKIE_CHUNK) chunks.push(payload.slice(p, p + COOKIE_CHUNK))
-      if (chunks.length > 12) return false
-      chunks.forEach(function (c, idx) {
-        writeCookie(COOKIE_PREFIX + '_' + idx, c, COOKIE_DAYS)
-      })
-      writeCookie(COOKIE_COUNT, String(chunks.length), COOKIE_DAYS)
-      return true
+      return writeSeries(COOKIE_PREFIX, COOKIE_COUNT, toBase64Url(payload), COOKIE_MAX_THEME_CHUNKS)
+    } catch (e) {
+      return false
+    }
+  }
+
+  /** The image gets its own series so a colour tweak never rewrites it. */
+  function saveImageToCookies(dataUrl) {
+    try {
+      if (!dataUrl) {
+        var prev = parseInt(readCookie(IMG_COUNT) || '0', 10)
+        for (var i = 0; i < prev; i++) eraseCookie(IMG_PREFIX + '_' + i)
+        eraseCookie(IMG_PREFIX)
+        eraseCookie(IMG_COUNT)
+        return true
+      }
+      return writeSeries(IMG_PREFIX, IMG_COUNT, toBase64Url(dataUrl), COOKIE_MAX_IMAGE_CHUNKS)
     } catch (e) {
       return false
     }
   }
 
   function loadFromCookies() {
+    var b64 = null
     try {
-      var n = parseInt(readCookie(COOKIE_COUNT) || '0', 10)
-      if (n > 0) {
-        var parts = []
-        for (var i = 0; i < n; i++) {
-          var c = readCookie(COOKIE_PREFIX + '_' + i)
-          if (c === null) return null
-          parts.push(c)
-        }
-        return JSON.parse(parts.join(''))
-      }
-      var single = readCookie(COOKIE_PREFIX)
-      if (single) return JSON.parse(single)
+      b64 = readSeries(COOKIE_PREFIX, COOKIE_COUNT)
     } catch (e) {}
+    if (b64 !== null) {
+      try {
+        return JSON.parse(fromBase64Url(b64))
+      } catch (e) {}
+    }
+    // Themes written before this version are plain JSON in the same cookies.
+    var legacy = null
+    try {
+      legacy = readSeriesRaw(COOKIE_PREFIX, COOKIE_COUNT)
+    } catch (e) {}
+    if (legacy) {
+      try {
+        return JSON.parse(legacy)
+      } catch (e) {}
+    }
     return null
+  }
+
+  function loadImageFromCookies() {
+    try {
+      var b64 = readSeries(IMG_PREFIX, IMG_COUNT)
+      return b64 ? fromBase64Url(b64) : ''
+    } catch (e) {
+      return ''
+    }
+  }
+
+  /** The pre-base64 layout: raw JSON, one character per byte. */
+  function readSeriesRaw(prefix, countName) {
+    var n = parseInt(readCookie(countName) || '0', 10)
+    if (!(n > 0)) {
+      var single = readCookie(prefix)
+      return single || null
+    }
+    var parts = []
+    for (var i = 0; i < n; i++) {
+      var c = readCookie(prefix + '_' + i)
+      if (c === null) return null
+      parts.push(c)
+    }
+    return parts.join('')
+  }
+
+  /** The image lives in its own cookie series; fold it back into the theme. */
+  function withImage(s) {
+    var img = loadImageFromCookies()
+    if (img) s.background.image = img
+    return s
   }
 
   function loadState() {
     var fromCookie = loadFromCookies()
-    if (fromCookie) return normalizeState(fromCookie)
+    if (fromCookie) return withImage(normalizeState(fromCookie))
     try {
       var ls = localStorage.getItem(LS_KEY)
       if (ls) {
-        var parsed = normalizeState(JSON.parse(ls))
+        var parsed = withImage(normalizeState(JSON.parse(ls)))
         // migrate the same-session cache into cookies for the next launch
-        saveState(parsed)
+        saveStateNow(parsed)
         return parsed
       }
     } catch (e) {}
@@ -916,19 +1130,61 @@
     return clone(DEFAULT_STATE)
   }
 
+  /*
+   * Saving.
+   *
+   * This used to be a plain trailing debounce: every call pushed the deadline
+   * back by 250ms. Dragging a dial or a colour picker fires continuously, so
+   * the deadline never arrived while the user was actually moving the mouse,
+   * and if the window closed mid-drag nothing had been written at all - which
+   * is the second half of "saving does not work".
+   *
+   * Now it is a throttle with a trailing edge: the first change is written
+   * after a short pause, and after SAVE_AT_MOST the state is written whether or
+   * not the user is still moving. Every page-hidden event also flushes.
+   */
   var saveTimer = null
-  function saveState(state, immediate) {
-    var payload = JSON.stringify(state)
-    function commit() {
-      try {
-        localStorage.setItem(LS_KEY, payload)
-      } catch (e) {}
-      saveToCookies(payload)
+  var saveFirstAt = 0
+  var pending = null
+  var SAVE_AFTER = 400
+  var SAVE_AT_MOST = 1500
+  var saveNotice = null
+
+  function saveStateNow(s) {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
     }
-    if (immediate) return commit()
-    clearTimeout(saveTimer)
-    saveTimer = setTimeout(commit, 250)
+    saveFirstAt = 0
+    var payload = JSON.stringify(s)
+    try {
+      localStorage.setItem(LS_KEY, payload)
+    } catch (e) {}
+    var ok = saveToCookies(payload)
+    saveImageToCookies(s.background ? s.background.image : '')
+    if (!ok && saveNotice) saveNotice('This theme is too big to save')
+    return ok
   }
+
+  function saveState(s, immediate) {
+    pending = s
+    if (immediate) return saveStateNow(s)
+    if (saveTimer && Date.now() - saveFirstAt > SAVE_AT_MOST) return saveStateNow(s)
+    if (saveTimer) clearTimeout(saveTimer)
+    else saveFirstAt = Date.now()
+    saveTimer = setTimeout(function () {
+      saveStateNow(pending)
+    }, SAVE_AFTER)
+  }
+
+  // A closed tab or a hidden window must not cost the last edit.
+  function flushSave() {
+    if (pending && saveTimer) saveStateNow(pending)
+  }
+  window.addEventListener('pagehide', flushSave)
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushSave()
+  })
 
   /* ------------------------------------------------------------------ *
    * Applying the theme
@@ -945,6 +1201,31 @@
     document.documentElement.style.removeProperty(name)
   }
 
+  /*
+   * Gradients.
+   *
+   * A gradient is stored beside the colour it replaces, under the same token
+   * name, and is written into that token. Freebuff paints its surfaces with
+   * `background: var(--x)` and never with `background-color: var(--x)`, so a
+   * gradient lands correctly almost everywhere. The handful of places that do
+   * read one of these tokens as a *colour* would drop the declaration and
+   * inherit instead, so those selectors are pinned back to the solid colour.
+   */
+  var GRADIENT_FALLBACK = {
+    '--bg': '.isolated-check, .change-comment-count, .agent-option-ask-action.primary',
+    '--surface': '.thread-mention-tip-actions .btn.primary, .question-option-box svg',
+  }
+
+  /** The colour a gradient replaced, kept so the fallbacks have something to use. */
+  var solidCache = {}
+
+  function gradientCss(g) {
+    var from = toCss(g.from)
+    var to = toCss(g.to)
+    if (g.type === 'radial') return 'radial-gradient(circle at 50% 50%, ' + from + ', ' + to + ')'
+    return 'linear-gradient(' + Math.round(g.angle) + 'deg, ' + from + ', ' + to + ')'
+  }
+
   function currentValues() {
     // Order matters: preset is the base, explicit overrides win on top.
     var out = {}
@@ -954,6 +1235,13 @@
     for (var k2 in state.layout) out[k2] = state.layout[k2]
     // The dials run last so they retune the finished palette, whatever built it.
     if (adjustmentsActive()) for (var k3 in out) out[k3] = adjustColor(out[k3], k3)
+    // Gradients go on after the dials: a gradient string is not a colour, and
+    // hue-rotating it would only mean re-parsing it back out again.
+    solidCache = {}
+    for (var gk in state.gradients) {
+      if (typeof out[gk] === 'string') solidCache[gk] = out[gk]
+      out[gk] = gradientCss(state.gradients[gk])
+    }
     return out
   }
 
@@ -978,6 +1266,7 @@
       else document.documentElement.style.removeProperty('color-scheme')
     }
     applyRaw()
+    applyPageStyles(next)
   }
 
   function applyRaw() {
@@ -992,6 +1281,152 @@
       document.head.appendChild(el)
     }
     el.textContent = state.raw
+  }
+
+  /* ------------------------------------------------------------------ *
+   * The page layer
+   *
+   * Inline styles on <html> cover everything that reads a token from :root.
+   * Three things do not, and they are all reported bugs:
+   *
+   * 1. Freebuff redeclares a handful of tokens on `.desktop-shell`,
+   *    `.app-workspace`, `.app`, `.project-sidebar` and `.terminal-panel`. A
+   *    declaration on the element that *uses* a token beats one inherited from
+   *    an ancestor, so setting `--workspace-corner` on <html> did nothing at
+   *    all - which is why the Corner radius buttons only moved some corners.
+   *    Those tokens are re-declared here with !important, on a selector list
+   *    that covers every element the app does that to.
+   * 2. The minimise / maximise / close buttons, the settings page radii and
+   *    the logo have no token of their own to set.
+   * 3. A background picture is a property, not a custom property.
+   *
+   * So this layer is a real stylesheet, rewritten whenever the theme changes.
+   * ------------------------------------------------------------------ */
+
+  /* Every token the app declares on something other than :root. */
+  var SHELL_OWNED = [
+    '--panel-divider', '--shell-header-divider', '--shell-inset', '--shell-rail-width',
+    '--tabbar-height', '--workspace-corner', '--workspace-edge', '--workspace-shadow',
+    '--sidebar-canvas', '--sidebar-edge', '--terminal-background', '--tab-new-space',
+    '--explorer-reserve', '--rail-reserve', '--native-controls-width',
+    // Radii the settings page and modals declare for themselves.
+    '--settings-card-radius', '--settings-control-radius', '--settings-popup-radius',
+    '--settings-corner', '--clip-radius',
+  ]
+  var SHELL_SELECTOR =
+    ':root, .desktop-shell, .app-workspace, .app, .project-sidebar, .terminal-panel, .settings-page, .modal'
+
+  var LOGO_IMG_SELECTOR = '.new-thread-logo, .splash-logo, .loading-screen-logo, .empty-space-logo'
+  // An inline SVG has no image to swap: paint a background behind it and hide
+  // its own shapes.
+  var LOGO_BOX_SELECTOR = '.project-sidebar-wordmark'
+
+  function cssEscapeUrl(url) {
+    return 'url("' + String(url).replace(/["\\\n\r]/g, '') + '")'
+  }
+
+  function hexToRgbParts(hex) {
+    var c = parseColor(hex)
+    if (!c) return { r: 0, g: 0, b: 0 }
+    return { r: parseInt(c.hex.slice(1, 3), 16), g: parseInt(c.hex.slice(3, 5), 16), b: parseInt(c.hex.slice(5, 7), 16) }
+  }
+
+  /** The style sheet body for the current theme. Pure, so it is easy to reason about. */
+  function pageOverrideCss(values) {
+    var lines = []
+    var k
+
+    var shell = []
+    for (k in values) if (SHELL_OWNED.indexOf(k) >= 0) shell.push(k)
+    if (shell.length) {
+      lines.push(SHELL_SELECTOR + ' {')
+      shell.forEach(function (name) {
+        lines.push('  ' + name + ': ' + values[name] + ' !important;')
+      })
+      lines.push('}')
+    }
+
+    // A gradient dropped into a token that something also reads as a colour.
+    for (var gt in GRADIENT_FALLBACK) {
+      if (values[gt] && solidCache[gt]) {
+        lines.push(GRADIENT_FALLBACK[gt] + ' { color: ' + solidCache[gt] + ' !important; }')
+      }
+    }
+
+    var w = state.window || {}
+    if (w.ink) lines.push('.window-control { color: ' + w.ink + ' !important; }')
+    if (w.hoverBg || w.hoverInk) {
+      lines.push(
+        '.window-control:hover { ' +
+          (w.hoverBg ? 'background: ' + w.hoverBg + ' !important; ' : '') +
+          (w.hoverInk ? 'color: ' + w.hoverInk + ' !important; ' : '') +
+          '}'.trim(),
+      )
+    }
+    if (w.closeBg || w.closeInk) {
+      lines.push(
+        '.window-control-close:hover { ' +
+          (w.closeBg ? 'background: ' + w.closeBg + ' !important; ' : '') +
+          (w.closeInk ? 'color: ' + w.closeInk + ' !important; ' : '') +
+          '}',
+      )
+    }
+
+    var logo = state.logo || {}
+    if (logo.image) {
+      var src = cssEscapeUrl(logo.image)
+      var scale = logo.size && logo.size !== 1 ? ' scale(' + logo.size + ') !important;' : ''
+      var dim = logo.opacity != null && logo.opacity < 1 ? ' opacity: ' + logo.opacity + ' !important;' : ''
+      var filt = ' filter: ' + (logo.filter || 'none') + ' !important;'
+      lines.push(LOGO_IMG_SELECTOR + ' { content: ' + src + ' !important; object-fit: contain !important;' + scale + dim + filt + ' transform-origin: center !important; }')
+      lines.push(LOGO_BOX_SELECTOR + ' { background-image: ' + src + ' !important; background-size: contain !important; background-repeat: no-repeat !important; background-position: center !important;' + filt + ' }')
+      lines.push(LOGO_BOX_SELECTOR + ' > * { visibility: hidden !important; }')
+    }
+
+    var bg = state.background || {}
+    if (bg.image) {
+      var baseToken = bg.whole ? '--bg' : '--workspace-surface'
+      var base = values[baseToken] || values['--bg'] || '#000000'
+      var dimAmount = bg.dim || 0
+      var parts = hexToRgbParts(base)
+      // Dim pulls the veil towards black; opacity lets the surface show
+      // through. Both end up in one rgba, because a background layer can only
+      // be faded as a whole.
+      var alpha = 1 - (bg.opacity == null ? 1 : bg.opacity) * (1 - dimAmount)
+      var veil = 'rgba(' + Math.round(parts.r * (1 - dimAmount)) + ',' + Math.round(parts.g * (1 - dimAmount)) + ',' + Math.round(parts.b * (1 - dimAmount)) + ',' + Math.round(alpha * 1000) / 1000 + ')'
+      var size = bg.fit === 'tile' ? 'auto' : bg.fit === 'stretch' ? '100% 100%' : bg.fit === 'contain' ? 'contain' : 'cover'
+      var repeat = bg.fit === 'tile' ? 'repeat' : 'no-repeat'
+      var pos = bg.position || 'center'
+      var targets = bg.whole ? '.app, body' : '.workspace-frame, .settings-frame'
+      lines.push(
+        targets +
+          ' { background-image: linear-gradient(' + veil + ', ' + veil + '), ' + cssEscapeUrl(bg.image) +
+          ' !important; background-size: auto, ' + size + ' !important;' +
+          ' background-repeat: no-repeat, ' + repeat + ' !important;' +
+          ' background-position: center, ' + pos + ' !important; }',
+      )
+    }
+
+    return lines.join('\n')
+  }
+
+  function applyPageStyles(values) {
+    var css = pageOverrideCss(values)
+    var el = document.getElementById(PAGE_STYLE_ID)
+    if (!css) {
+      if (el) el.remove()
+      return
+    }
+    if (!el) {
+      el = document.createElement('style')
+      el.id = PAGE_STYLE_ID
+      document.head.appendChild(el)
+    }
+    // Re-appended so it stays the last sheet in <head>: equal-specificity
+    // !important rules are resolved by order, and the app's own !important
+    // rules must not be able to beat the theme.
+    document.head.appendChild(el)
+    el.textContent = css
   }
 
   function resetAll() {
@@ -1370,6 +1805,40 @@
 .fbts-picker-foot { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border-top: 1px solid var(--fbts-line); }
 .fbts-picker-foot .grow { flex: 1; }
 
+/* ---- fill mode, and the two stops of a gradient ---- */
+.fbts-mode {
+  padding: 4px 9px; border: 1px solid var(--fbts-line); border-radius: 3px; background: none;
+  color: var(--fbts-mute); font-size: 10px; font-weight: 600; cursor: pointer;
+}
+.fbts-mode:hover { color: var(--fbts-ink); }
+.fbts-mode.active { background: var(--fbts-accent); border-color: var(--fbts-accent); color: var(--fbts-panel); }
+.fbts-stopbtn {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px 3px 4px;
+  border: 1px solid var(--fbts-line); border-radius: 3px; background: none;
+  color: var(--fbts-mute); font-size: 10px; font-weight: 700; cursor: pointer;
+}
+.fbts-stopbtn.active { border-color: var(--fbts-accent); color: var(--fbts-ink); }
+.fbts-stopswatch { width: 14px; height: 14px; flex: none; border-radius: 2px; border: 1px solid rgba(0,0,0,.45); }
+
+/* ---- page tab: picture boxes and sliders ---- */
+.fbts-imgbox {
+  display: grid; place-items: center; height: 104px; overflow: hidden; border: 1px dashed var(--fbts-line);
+  border-radius: 4px; background-color: var(--fbts-panel);
+  background-image: linear-gradient(45deg, rgba(255,255,255,.045) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.045) 75%),
+                    linear-gradient(45deg, rgba(255,255,255,.045) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.045) 75%);
+  background-size: 14px 14px; background-position: 0 0, 7px 7px;
+}
+.fbts-imgbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.fbts-imgbox span { color: var(--fbts-faint); font-size: 10px; text-align: center; padding: 0 8px; }
+.fbts-slider { display: flex; align-items: center; gap: 9px; padding: 3px 0; }
+.fbts-slider > span:first-child { width: 62px; flex: none; font-size: 10.5px; color: var(--fbts-mute); }
+.fbts-slider input[type=range] { flex: 1; min-width: 0; accent-color: var(--fbts-accent); }
+.fbts-slider-val { width: 40px; flex: none; text-align: right; font-family: var(--fbts-mono); font-size: 10px; color: var(--fbts-mute); }
+.fbts-col { display: flex; flex-direction: column; gap: 8px; }
+.fbts-community-note { margin: 0 0 9px; font-size: 10.5px; line-height: 1.5; color: var(--fbts-mute); }
+.fbts-community-note code { font-family: var(--fbts-mono); font-size: 10px; color: var(--fbts-ink); }
+.fbts-author { color: var(--fbts-faint); font-size: 9.5px; }
+
 /* ---- options ---- */
 .fbts-option { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 11.5px; color: var(--fbts-ink); cursor: pointer; }
 .fbts-option input { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--fbts-accent); }
@@ -1378,6 +1847,8 @@
 .fbts-row-label { flex: 1; font-size: 11.5px; color: var(--fbts-mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fbts-row-label code { font-family: var(--fbts-mono); font-size: 9.5px; color: var(--fbts-faint); display: block; }
 .fbts-swatchinput { width: 26px; height: 24px; padding: 0; border: 1px solid var(--fbts-line); border-radius: 4px; background: none; cursor: pointer; flex: none; }
+/* Dashed means "nothing set here - it follows the theme". */
+.fbts-swatchinput.empty { border-style: dashed; }
 .fbts-swatchinput::-webkit-color-swatch-wrapper { padding: 2px; }
 .fbts-swatchinput::-webkit-color-swatch { border: none; border-radius: 3px; }
 .fbts-textinput {
@@ -1617,6 +2088,7 @@
 
     var remoteVersion = ''
     var checking = false
+    var updateStatus = ''
 
     function showChip(version) {
       chipLabel.textContent = 'Update ' + version
@@ -1707,35 +2179,76 @@
      * `--fbts-remote-version`. Reading it back through getComputedStyle works
      * even cross-origin, and a missing or blocked feed just means silence.
      */
-    function checkForUpdates(manual) {
-      if (checking || !document.head) return
-      var last = parseInt(readCookie(CHECK_COOKIE) || '0', 10)
-      if (!manual && Date.now() - last < CHECK_INTERVAL) return
-      checking = true
-      if (manual) showToast('Checking for updates\u2026')
-
+    /** Ask one host for the feed. Calls back with the version, or '' if it could not. */
+    function probeHost(host, done) {
       var link = document.createElement('link')
       link.rel = 'stylesheet'
       // jsDelivr ignores query strings for its own cache, so this parameter is
       // here to keep the *browser* honest: it would otherwise keep this file
       // for a week. A per-hour address caps browser staleness at an hour, while
       // the CDN's own entry is purged as part of publishing a release.
-      link.href = UPDATE_FEED + '?h=' + new Date().toISOString().slice(0, 13)
+      link.href = host + FEED_PATH + '?h=' + new Date().toISOString().slice(0, 13)
       var settled = false
 
-      function settle(version) {
+      function finish(version) {
         if (settled) return
         settled = true
-        checking = false
         if (link.parentNode) link.parentNode.removeChild(link)
-        document.documentElement.removeAttribute(UPDATE_PROBE)
-        if (!version) {
+        done(version)
+      }
+
+      link.addEventListener('load', function () {
+        var value = ''
+        try {
+          value = getComputedStyle(document.documentElement).getPropertyValue(REMOTE_VERSION_VAR)
+        } catch (e) {}
+        finish(cleanVersion(value))
+      })
+      link.addEventListener('error', function () {
+        finish('')
+      })
+      setTimeout(function () {
+        finish('')
+      }, CHECK_TIMEOUT)
+
+      document.head.appendChild(link)
+    }
+
+    function checkForUpdates(manual) {
+      if (checking || !document.head) return
+      var last = parseInt(readCookie(CHECK_COOKIE) || '0', 10)
+      if (!manual && Date.now() - last < CHECK_INTERVAL) return
+      checking = true
+      updateStatus = 'checking'
+      if (manual) showToast('Checking for updates\u2026')
+
+      var index = 0
+      document.documentElement.setAttribute(UPDATE_PROBE, '')
+
+      function tryNext() {
+        if (index >= FEED_HOSTS.length) {
+          checking = false
+          updateStatus = 'failed'
+          document.documentElement.removeAttribute(UPDATE_PROBE)
           if (manual) showToast('Could not check for updates')
           return
         }
+        probeHost(FEED_HOSTS[index++], function (version) {
+          if (!version) return tryNext()
+          finish(version)
+        })
+      }
+
+      function finish(version) {
+        if (!checking) return
+        checking = false
+        updateStatus = 'ok'
+        document.documentElement.removeAttribute(UPDATE_PROBE)
         writeCookie(CHECK_COOKIE, String(Date.now()), 365)
+        writeCookie(CHECK_SEEN_COOKIE, version, 365)
         if (!isNewer(version, VERSION)) {
           if (manual) showToast('You are on the latest version')
+          refreshVersionLabel()
           return
         }
         remoteVersion = version
@@ -1747,22 +2260,7 @@
         showUpdatePopup()
       }
 
-      link.addEventListener('load', function () {
-        var value = ''
-        try {
-          value = getComputedStyle(document.documentElement).getPropertyValue(REMOTE_VERSION_VAR)
-        } catch (e) {}
-        settle(cleanVersion(value))
-      })
-      link.addEventListener('error', function () {
-        settle('')
-      })
-      setTimeout(function () {
-        settle('')
-      }, CHECK_TIMEOUT)
-
-      document.documentElement.setAttribute(UPDATE_PROBE, '')
-      document.head.appendChild(link)
+      tryNext()
     }
 
     var picker = colorPicker()
@@ -1776,6 +2274,22 @@
       text: 'v' + VERSION,
       onclick: function () { checkForUpdates(true) },
     })
+
+    /*
+     * The version line doubles as the update-check readout, because a check
+     * that fails silently is indistinguishable from one that never ran - which
+     * is how "the auto update is not working" starts.
+     */
+    function refreshVersionLabel() {
+      var presetDef = PRESET_BY_ID[state.preset]
+      var tail = presetDef ? presetDef.label : 'custom'
+      var mark = updateStatus === 'checking' ? '  \u00b7  checking\u2026' : updateStatus === 'failed' ? '  \u00b7  offline' : ''
+      schemeLabel.textContent = 'v' + VERSION + '  \u00b7  ' + tail + mark
+      schemeLabel.title =
+        updateStatus === 'failed'
+          ? 'Could not reach the update server. Click to try again.'
+          : 'Check for updates' + (remoteVersion ? ' (latest seen: v' + remoteVersion + ')' : '')
+    }
     var head = el('div', { class: 'fbts-titlebar' }, [
       el('span', { class: 'fbts-titlebar-icon', html: RAIL_ICON }),
       el('div', { class: 'fbts-titlebar-text' }, [
@@ -1800,8 +2314,10 @@
     /* ---- tabs ---- */
     var TAB_DEFS = [
       ['presets', 'Presets'],
+      ['community', 'Community'],
       ['colors', 'Colors'],
       ['layout', 'Layout'],
+      ['page', 'Logo and background'],
       ['advanced', 'Advanced'],
       ['io', 'Export'],
     ]
@@ -1893,7 +2409,6 @@
       var titleEl = el('span', { class: 'fbts-picker-title' })
       var tokenEl = el('code', { class: 'fbts-picker-token' })
       var closeBtn = el('button', { class: 'fbts-x', type: 'button', text: '\u00d7', title: 'Close' })
-      var hueState = { h: 0, s: 0, v: 0, a: 1 }
       var svDot = el('span', { class: 'fbts-sv-dot' })
       var sv = el('div', { class: 'fbts-sv' }, [svDot])
       var hueThumb = el('span', { class: 'fbts-hue-thumb' })
@@ -1903,11 +2418,62 @@
       var preview = el('span', { class: 'fbts-preview' })
       var resetBtn = el('button', { class: 'fbts-btn', type: 'button', text: 'Reset' })
       var doneBtn = el('button', { class: 'fbts-btn primary', type: 'button', text: 'Done' })
+
+      /*
+       * Fill: one flat colour, or a gradient between two of them. A gradient is
+       * saved under the same token name as the colour it covers, so a theme
+       * with gradients needs no extra vocabulary - and theme files written
+       * before this existed keep working, because a theme without a gradient is
+       * just a theme with no gradients.
+       */
+      var stops = { from: { h: 0, s: 0, v: 0, a: 1 }, to: { h: 0, s: 0, v: 0, a: 1 } }
+      var activeStop = 'from'
+      var mode = 'solid'
+      var gradAngle = 160
+
+      function cur() {
+        return stops[activeStop]
+      }
+
+      var modeBtns = {}
+      var modeRow = el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Fill' })])
+      ;[
+        ['solid', 'Solid', 'One flat colour'],
+        ['linear', 'Linear', 'A gradient in a straight line'],
+        ['radial', 'Radial', 'A gradient from the middle outwards'],
+      ].forEach(function (pair) {
+        var b = el('button', { class: 'fbts-mode', type: 'button', text: pair[1], title: pair[2] })
+        b.addEventListener('click', function () { setMode(pair[0]) })
+        modeBtns[pair[0]] = b
+        modeRow.appendChild(b)
+      })
+
+      var stopSw = {}
+      var stopBtns = {}
+      var stopRow = el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Stop' })])
+      ;[
+        ['from', 'A'],
+        ['to', 'B'],
+      ].forEach(function (pair) {
+        var sw = el('span', { class: 'fbts-stopswatch' })
+        var b = el('button', { class: 'fbts-stopbtn', type: 'button', title: 'Edit stop ' + pair[1] }, [sw, el('span', { text: pair[1] })])
+        b.addEventListener('click', function () { activeStop = pair[0]; paint() })
+        stopSw[pair[0]] = sw
+        stopBtns[pair[0]] = b
+        stopRow.appendChild(b)
+      })
+
+      var angle = el('input', { class: 'fbts-alpha-wide', type: 'range', min: '0', max: '360', step: '1' })
+      var angleRow = el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Angle' }), angle])
+
       var box = el('div', { class: 'fbts-picker' }, [
         el('div', { class: 'fbts-picker-head' }, [titleEl, tokenEl, el('div', { class: 'grow' }), closeBtn]),
         el('div', { class: 'fbts-picker-body' }, [
+          modeRow,
+          stopRow,
           sv,
           hue,
+          angleRow,
           el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Opacity' }), alpha]),
           el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Hex' }), hex, preview]),
         ]),
@@ -1918,47 +2484,120 @@
       var notify = null
       var anchor = null
 
-      function paint() {
-        var css = hsvaCss(hueState, hueState.a)
-        sv.style.setProperty('--fbts-hue-color', hsvToHex(hueState.h, 100, 100))
-        svDot.style.left = hueState.s + '%'
-        svDot.style.top = 100 - hueState.v + '%'
-        hueThumb.style.left = (hueState.h / 360) * 100 + '%'
-        alpha.value = String(Math.round(hueState.a * 100))
-        preview.style.background = css
-        hex.value = hsvToHex(hueState.h, hueState.s, hueState.v)
+      function setMode(next) {
+        mode = next
+        push()
       }
 
-      /** Write the picker's colour onto every token the target covers. */
+      function paint() {
+        var c = cur()
+        var css = hsvaCss(c, c.a)
+        sv.style.setProperty('--fbts-hue-color', hsvToHex(c.h, 100, 100))
+        svDot.style.left = c.s + '%'
+        svDot.style.top = 100 - c.v + '%'
+        hueThumb.style.left = (c.h / 360) * 100 + '%'
+        alpha.value = String(Math.round(c.a * 100))
+        preview.style.background = mode === 'solid' ? css : gradientCss({ type: mode, angle: gradAngle, from: stopColor('from'), to: stopColor('to') })
+        hex.value = hsvToHex(c.h, c.s, c.v)
+        angle.value = String(Math.round(gradAngle))
+
+        for (var k in modeBtns) modeBtns[k].classList.toggle('active', mode === k)
+        var on = mode !== 'solid'
+        stopRow.style.display = on ? '' : 'none'
+        angleRow.style.display = mode === 'linear' ? '' : 'none'
+        for (var s in stopSw) {
+          var sv2 = stops[s]
+          stopSw[s].style.background = hsvaCss(sv2, sv2.a)
+          stopBtns[s].classList.toggle('active', on && activeStop === s)
+        }
+      }
+
+      function stopColor(which) {
+        var s = stops[which]
+        return { hex: hsvToHex(s.h, s.s, s.v), a: s.a }
+      }
+
+      /**
+       * Write the picker's colour onto every token the target covers.
+       *
+       * A target with no tokens is a callback one: it is editing something that
+       * is not a custom property (the window buttons), so the value is handed
+       * to the caller instead of being written into state.colors.
+       */
       function push() {
         if (!target) return
-        var value = { hex: hsvToHex(hueState.h, hueState.s, hueState.v), a: hueState.a }
-        target.tokens.forEach(function (t) {
-          state.colors[t] = value
-          delete state.layout[t]
-        })
-        applyState()
-        saveState(state)
+        var value = stopColor(activeStop)
+        var wanted = mode === 'solid' ? null : { type: mode, angle: gradAngle, from: stopColor('from'), to: stopColor('to') }
+        if (target.tokens.length) {
+          target.tokens.forEach(function (t) {
+            // The solid colour is kept underneath either way: it is what the
+            // picker opens with next time, and what the gradient falls back to
+            // wherever the token is read as a colour.
+            state.colors[t] = value
+            delete state.layout[t]
+            if (wanted) state.gradients[t] = clone(wanted)
+            else delete state.gradients[t]
+          })
+          applyState()
+          saveState(state)
+          refreshSpots()
+        }
         paint()
-        refreshSpots()
-        if (notify) notify(value.hex, value.a)
+        if (notify) notify(value.hex, value.a, wanted)
       }
 
-      /** Adopt the colour a token already has. */
-      function loadCurrent(tokens) {
-        var cur = currentColorFor(tokens[0])
-        var rgb = [parseInt(cur.hex.slice(1, 3), 16), parseInt(cur.hex.slice(3, 5), 16), parseInt(cur.hex.slice(5, 7), 16)]
+      /** Adopt the colour, or the gradient, a target already has. */
+      function loadCurrent(tokens, explicit) {
+        var g = explicit && explicit.gradient ? explicit.gradient : tokens.length ? state.gradients[tokens[0]] : null
+        if (g) {
+          mode = g.type
+          gradAngle = g.angle
+          stops.from = hsvFromColor(g.from)
+          stops.to = hsvFromColor(g.to)
+          activeStop = 'from'
+          return
+        }
+        mode = 'solid'
+        gradAngle = 160
+        activeStop = 'from'
+        var base = explicit && explicit.color ? explicit.color : tokens.length ? currentColorFor(tokens[0]) : { hex: '#808080', a: 1 }
+        // parseColor() only reads strings, and currentColorFor() hands back an
+        // object - so accept both rather than quietly falling through to grey.
+        var c = asColorValue(base) || { hex: '#808080', a: 1 }
+        stops.from = hsvFromColor(c)
+        // Stop B starts a little lighter than stop A, so switching a fill to a
+        // gradient shows something rather than a flat bar.
+        var b = hsvFromColor(c)
+        b.v = Math.min(100, b.v + 28)
+        b.s = Math.max(0, b.s - 18)
+        stops.to = b
+      }
+
+      function hsvFromColor(c) {
+        var rgb = [parseInt(c.hex.slice(1, 3), 16), parseInt(c.hex.slice(3, 5), 16), parseInt(c.hex.slice(5, 7), 16)]
         var hsv = rgbToHsv(rgb[0], rgb[1], rgb[2])
-        hueState = { h: hsv.h, s: hsv.s, v: hsv.v, a: cur.a == null ? 1 : cur.a }
+        return { h: hsv.h, s: hsv.s, v: hsv.v, a: c.a == null ? 1 : c.a }
+      }
+
+      /** A {hex,a} object or a colour string, as {hex,a} - or null. */
+      function asColorValue(v) {
+        if (v && typeof v === 'object' && typeof v.hex === 'string') return { hex: v.hex, a: v.a == null ? 1 : v.a }
+        if (typeof v === 'string') {
+          var parsed = parseColor(v)
+          return parsed ? { hex: parsed.hex, a: parsed.a == null ? 1 : parsed.a } : null
+        }
+        return null
       }
 
       function open(next, anchorEl) {
         target = next
         notify = next.onChange || null
         anchor = anchorEl
-        loadCurrent(next.tokens)
+        loadCurrent(next.tokens || [], next.initial)
         titleEl.textContent = next.label
-        tokenEl.textContent = next.tokens.join(' ')
+        tokenEl.textContent = next.solidOnly ? '' : next.tokens.join(' ')
+        modeRow.style.display = next.solidOnly ? 'none' : ''
+        if (next.solidOnly) mode = 'solid'
         paint()
         place()
         box.classList.add('show')
@@ -2002,18 +2641,23 @@
 
       drag(sv, function (e) {
         var r = sv.getBoundingClientRect()
-        hueState.s = bound(((e.clientX - r.left) / r.width) * 100, 0, 100)
-        hueState.v = bound(100 - ((e.clientY - r.top) / r.height) * 100, 0, 100)
+        var c = cur()
+        c.s = bound(((e.clientX - r.left) / r.width) * 100, 0, 100)
+        c.v = bound(100 - ((e.clientY - r.top) / r.height) * 100, 0, 100)
         push()
       })
       drag(hue, function (e) {
         var r = hue.getBoundingClientRect()
-        hueState.h = bound(((e.clientX - r.left) / r.width) * 360, 0, 360)
+        cur().h = bound(((e.clientX - r.left) / r.width) * 360, 0, 360)
         push()
       })
 
       alpha.addEventListener('input', function () {
-        hueState.a = bound(parseFloat(alpha.value) / 100, 0, 1)
+        cur().a = bound(parseFloat(alpha.value) / 100, 0, 1)
+        push()
+      })
+      angle.addEventListener('input', function () {
+        gradAngle = bound(parseFloat(angle.value) || 0, 0, 360)
         push()
       })
       hex.addEventListener('input', function () {
@@ -2021,22 +2665,24 @@
         if (!parsed) return
         var rgb = [parseInt(parsed.hex.slice(1, 3), 16), parseInt(parsed.hex.slice(3, 5), 16), parseInt(parsed.hex.slice(5, 7), 16)]
         var hsv = rgbToHsv(rgb[0], rgb[1], rgb[2])
-        hueState.h = hsv.h
-        hueState.s = hsv.s
-        hueState.v = hsv.v
+        var c = cur()
+        c.h = hsv.h
+        c.s = hsv.s
+        c.v = hsv.v
         push()
       })
       resetBtn.addEventListener('click', function () {
         if (!target) return
         target.tokens.forEach(function (t) {
           delete state.colors[t]
+          delete state.gradients[t]
         })
         applyState()
         saveState(state)
         loadCurrent(target.tokens)
         paint()
         refreshSpots()
-        if (notify) notify(hsvToHex(hueState.h, hueState.s, hueState.v), hueState.a)
+        if (notify) notify(stopColor('from').hex, stops.from.a)
         showToast('Back to the preset')
       })
       closeBtn.addEventListener('click', close)
@@ -2177,18 +2823,25 @@
       return resolveTokenColor(token) || { hex: '#808080', a: 1 }
     }
 
+    /** How a token should be painted right now: its gradient, or its colour. */
+    function fillFor(token) {
+      var g = state.gradients[token]
+      if (g) return gradientCss(g)
+      return toCss(currentColorFor(token))
+    }
+
     /** Redraw every spot from the live colours, and mark the ones you changed. */
     function refreshSpots() {
       spotNodes.forEach(function (s) {
-        s.dot.style.background = toCss(currentColorFor(s.tokens[0]))
+        s.dot.style.background = fillFor(s.tokens[0])
         var changed = false
-        for (var i = 0; i < s.tokens.length; i++) if (state.colors[s.tokens[i]]) changed = true
+        for (var i = 0; i < s.tokens.length; i++) if (state.colors[s.tokens[i]] || state.gradients[s.tokens[i]]) changed = true
         s.node.classList.toggle('overridden', changed)
       })
       // Keep the Colors tab swatches in step with the picker.
       Array.prototype.forEach.call(shadow.querySelectorAll('.fbts-swatchinput'), function (sw) {
         var row = sw.closest('[data-token]')
-        if (row) sw.style.background = toCss(currentColorFor(row.dataset.token))
+        if (row) sw.style.background = fillFor(row.dataset.token)
       })
     }
 
@@ -2207,7 +2860,8 @@
       var reset = el('button', { class: 'fbts-mini', title: 'Reset', text: '\u21ba' })
 
       function paintSwatch(hexValue, a) {
-        colorInput.style.background = toCss({ hex: hexValue, a: a == null ? 1 : a })
+        var g = state.gradients[token]
+        colorInput.style.background = g ? gradientCss(g) : toCss({ hex: hexValue, a: a == null ? 1 : a })
       }
 
       function push(commitNow) {
@@ -2237,6 +2891,7 @@
       })
       alpha.addEventListener('input', function () { push(true) })
       reset.addEventListener('click', function () {
+        delete state.gradients[token]
         setOverride(token, null)
         var fresh = resolveTokenColor(token) || { hex: '#808080', a: 1 }
         hex.value = fresh.hex
@@ -2390,8 +3045,9 @@
         function handBack() {
           var changed = false
           tokens.forEach(function (t) {
-            if (state.colors[t]) changed = true
+            if (state.colors[t] || state.gradients[t]) changed = true
             delete state.colors[t]
+            delete state.gradients[t]
           })
           if (!changed) return
           applyState()
@@ -2418,7 +3074,10 @@
       ], {
         actions: [
           headLink('Reset', 'Hand every spot back to the preset', function () {
-            allSpotTokens.forEach(function (t) { delete state.colors[t] })
+            allSpotTokens.forEach(function (t) {
+              delete state.colors[t]
+              delete state.gradients[t]
+            })
             applyState()
             saveState(state, true)
             refreshSpots()
@@ -2483,7 +3142,27 @@
 
     /* ---- Layout tab ---- */
     var layoutPane = pane('layout')
-    var RADIUS_TOKENS = ['--radius-xs', '--radius-sm', '--radius-md', '--radius-lg', '--radius-xl', '--radius-control', '--radius-chrome-control', '--radius-popup', '--radius-composer', '--radius-dialog', '--radius-block', '--radius-inline']
+    /*
+     * Every token that rounds a corner.
+     *
+     * The Corner radius buttons used to set twelve of these and look like they
+     * were not working, because the corners people actually look at are rounded
+     * by tokens the buttons did not touch: the workspace box is rounded by
+     * --workspace-corner (declared on .desktop-shell, so setting it on <html>
+     * did nothing), and the settings page rounds itself with
+     * --settings-card-radius / --settings-control-radius / --settings-popup-radius
+     * / --settings-corner. --radius, --radius-block and --sidebar-row-radius are
+     * aliases of others, and are pinned too so the aliases cannot disagree with
+     * what they point at.
+     */
+    var CORNER_TOKENS = [
+      '--radius-xs', '--radius-sm', '--radius-md', '--radius-lg', '--radius-xl',
+      '--radius-control', '--radius-chrome-control', '--radius-popup', '--radius-composer',
+      '--radius-dialog', '--radius-block', '--radius-inline', '--radius',
+      '--sidebar-row-radius', '--settings-card-radius', '--settings-control-radius',
+      '--settings-popup-radius', '--settings-corner', '--clip-radius', '--workspace-corner',
+    ]
+    var RADIUS_TOKENS = CORNER_TOKENS.concat(['--radius-round'])
     var FONT_TOKENS = ['--font-size-caption', '--font-size-label', '--font-size-ui', '--font-size-body', '--font-size-message', '--font-size-title', '--font-size-heading', '--font-size-display']
     var SIZE_TOKENS = ['--chat-content-max-width', '--explorer-width', '--catalog-width', '--tabbar-height', '--control-height-md', '--sidebar-row-gap']
 
@@ -2504,9 +3183,13 @@
     function radiusPreset(title, value) {
       return el('button', {
         class: 'fbts-btn', text: title,
+        title: 'Set every corner to ' + value,
         onclick: function () {
-          ['--radius-xs', '--radius-sm', '--radius-md', '--radius-lg', '--radius-xl', '--radius-control', '--radius-chrome-control', '--radius-popup', '--radius-composer', '--radius-dialog', '--radius-block', '--radius-inline']
-            .forEach(function (t) { state.layout[t] = value })
+          CORNER_TOKENS.forEach(function (t) { state.layout[t] = value })
+          // --radius-round is the "fully round" token (pills, avatars). Leaving
+          // it alone keeps Round and Pill looking round instead of squaring off
+          // every pill in the app; Square means square, so it goes too.
+          state.layout['--radius-round'] = value === '0px' ? '0px' : '999px'
           commit('Radius: ' + title)
         },
       })
@@ -2548,6 +3231,513 @@
     )
     layoutPane.appendChild(group('Radii', [layoutGroup('Radius tokens', RADIUS_TOKENS)]))
     layoutPane.appendChild(group('Dimensions', [layoutGroup('Sizing', SIZE_TOKENS)]))
+
+    /*
+     * ================================================================
+     * Logo and background
+     * ================================================================
+     *
+     * Both are pictures, so both are stored as data URLs and travel inside the
+     * theme: a .fbtheme file with a background in it needs no hosting and no
+     * extra files. The price is size, and the panel says so rather than
+     * silently dropping the picture when it gets too big.
+     */
+
+    // Filled in by the two panes below, and called by rebuild() after a theme
+    // is imported, so the controls follow the state instead of the other way
+    // round.
+    var pageRefresh = null
+
+    function readAsDataUrl(file, cb) {
+      if (!file) return
+      if (file.size > 2.2 * 1024 * 1024) {
+        showToast('That picture is over 2 MB - please resize it first')
+        return
+      }
+      var reader = new FileReader()
+      reader.onload = function () { cb(String(reader.result == null ? '' : reader.result)) }
+      reader.onerror = function () { showToast('Could not read that file') }
+      reader.readAsDataURL(file)
+    }
+
+    function imagePicker(label, onPick) {
+      var input = el('input', {
+        type: 'file', style: 'display:none',
+        accept: 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml',
+      })
+      input.addEventListener('change', function () {
+        var f = input.files && input.files[0]
+        input.value = ''
+        readAsDataUrl(f, onPick)
+      })
+      var btn = el('button', { class: 'fbts-btn', type: 'button', text: label, onclick: function () { input.click() } })
+      return { input: input, btn: btn }
+    }
+
+    function previewBox(getSrc, emptyText) {
+      var box = el('div', { class: 'fbts-imgbox' })
+      function render() {
+        var src = getSrc()
+        box.textContent = ''
+        if (src) box.appendChild(el('img', { src: src, alt: '' }))
+        else box.appendChild(el('span', { text: emptyText }))
+      }
+      render()
+      return { node: box, render: render }
+    }
+
+    function sliderRow(label, min, max, step, get, set, fmt) {
+      var val = el('span', { class: 'fbts-slider-val' })
+      var input = el('input', { type: 'range', min: String(min), max: String(max), step: String(step) })
+      function render() {
+        var v = get()
+        input.value = String(v)
+        val.textContent = fmt ? fmt(v) : String(v)
+      }
+      input.addEventListener('input', function () {
+        set(parseFloat(input.value))
+        val.textContent = fmt ? fmt(parseFloat(input.value)) : input.value
+      })
+      render()
+      return { node: el('div', { class: 'fbts-slider' }, [el('span', { text: label }), input, val]), render: render }
+    }
+
+    function segRow(label, options, get, set) {
+      var btns = {}
+      var row = el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: label })])
+      options.forEach(function (pair) {
+        var b = el('button', { class: 'fbts-mode', type: 'button', text: pair[1], title: pair[2] || pair[1] })
+        b.addEventListener('click', function () {
+          set(pair[0])
+          render()
+        })
+        btns[pair[0]] = b
+        row.appendChild(b)
+      })
+      function render() {
+        var v = get()
+        for (var k in btns) btns[k].classList.toggle('active', k === v)
+      }
+      render()
+      return { node: row, render: render }
+    }
+
+    var pagePane = pane('page')
+
+    /* ---- the logo ---- */
+    var logoPreview = previewBox(function () { return state.logo.image }, 'No picture - Freebuff draws its own mark.')
+    var logoPick = imagePicker('Choose a picture', function (raw) {
+      var url = cleanDataUrl(raw)
+      if (!url) {
+        showToast('That file is not an image')
+        return
+      }
+      state.logo.image = url
+      commit('Logo changed')
+      renderLogo()
+    })
+    var logoSize = sliderRow('Size', 0.5, 3, 0.05, function () { return state.logo.size }, function (v) {
+      state.logo.size = v
+      commit()
+    }, function (v) { return Math.round(v * 100) + '%' })
+    var logoOpacity = sliderRow('Opacity', 0.05, 1, 0.05, function () { return state.logo.opacity }, function (v) {
+      state.logo.opacity = v
+      commit()
+    }, function (v) { return Math.round(v * 100) + '%' })
+    var logoFilter = el('input', {
+      class: 'fbts-textinput', type: 'text', spellcheck: 'false', placeholder: 'CSS filter, e.g. invert(1)',
+      oninput: function () {
+        state.logo.filter = logoFilter.value.trim().slice(0, 120)
+        commit()
+      },
+    })
+    var logoClear = el('button', {
+      class: 'fbts-btn', type: 'button', text: 'Remove',
+      onclick: function () {
+        state.logo = clone(DEFAULT_LOGO)
+        commit('Logo cleared')
+        renderLogo()
+      },
+    })
+
+    function renderLogo() {
+      logoFilter.value = state.logo.filter || ''
+      logoPick.btn.textContent = state.logo.image ? 'Replace picture' : 'Choose a picture'
+      logoPreview.render()
+      logoSize.render()
+      logoOpacity.render()
+    }
+
+    pagePane.appendChild(
+      group('Freebuff logo', [
+        el('div', { class: 'fbts-grid' }, [
+          logoPreview.node,
+          el('div', { class: 'fbts-col' }, [
+            el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [logoPick.btn, logoClear]),
+            logoPick.input,
+            logoSize.node,
+            logoOpacity.node,
+            el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Filter' }), logoFilter]),
+          ]),
+        ]),
+        el('div', {
+          class: 'fbts-note',
+          text: 'SVG, PNG, JPG, GIF or WebP. It replaces the mark on the new-thread screen, the loading screen, the splash and the project sidebar wordmark. Size and opacity only affect the watermark, which Freebuff draws very faint on purpose.',
+        }),
+      ], { actions: [headLink('Reset', 'Back to Freebuff\u2019s own mark', function () {
+        state.logo = clone(DEFAULT_LOGO)
+        commit('Logo cleared')
+        renderLogo()
+      })] }),
+    )
+
+    /* ---- the background picture ---- */
+    var bgPreview = previewBox(function () { return state.background.image }, 'No picture - the theme\u2019s own colour is used.')
+    var bgPick = imagePicker('Choose a picture', function (raw) {
+      var url = cleanDataUrl(raw)
+      if (!url) {
+        showToast('That file is not an image')
+        return
+      }
+      state.background.image = url
+      commit('Background changed')
+      renderBackground()
+    })
+    var bgFit = segRow('Fit', [
+      ['cover', 'Cover', 'Fill the area, cropping what does not fit'],
+      ['contain', 'Fit', 'Fit the whole picture inside'],
+      ['tile', 'Tile', 'Repeat it at its own size'],
+      ['stretch', 'Stretch', 'Stretch it to fill, ignoring the shape'],
+    ], function () { return state.background.fit }, function (v) { state.background.fit = v; commit() })
+    var bgPos = segRow('Position', [
+      ['center', 'Middle'], ['top', 'Top'], ['bottom', 'Bottom'], ['left', 'Left'], ['right', 'Right'],
+    ], function () { return state.background.position }, function (v) { state.background.position = v; commit() })
+    var bgWhere = segRow('Where', [
+      ['workspace', 'Workspace', 'The chat and editor area only'],
+      ['whole', 'Whole window', 'Behind the sidebar and the tab bar too'],
+    ], function () { return state.background.whole ? 'whole' : 'workspace' }, function (v) {
+      state.background.whole = v === 'whole'
+      commit()
+    })
+    var bgOpacity = sliderRow('Opacity', 0.05, 1, 0.05, function () { return state.background.opacity }, function (v) {
+      state.background.opacity = v
+      commit()
+    }, function (v) { return Math.round(v * 100) + '%' })
+    var bgDim = sliderRow('Dim', 0, 0.9, 0.05, function () { return state.background.dim }, function (v) {
+      state.background.dim = v
+      commit()
+    }, function (v) { return Math.round(v * 100) + '%' })
+    var bgClear = el('button', {
+      class: 'fbts-btn', type: 'button', text: 'Remove',
+      onclick: function () {
+        state.background = clone(DEFAULT_BACKGROUND)
+        commit('Background cleared')
+        renderBackground()
+      },
+    })
+
+    function renderBackground() {
+      bgPick.btn.textContent = state.background.image ? 'Replace picture' : 'Choose a picture'
+      bgPreview.render()
+      bgFit.render()
+      bgPos.render()
+      bgWhere.render()
+      bgOpacity.render()
+      bgDim.render()
+    }
+
+    pagePane.appendChild(
+      group('Background picture', [
+        el('div', { class: 'fbts-grid' }, [
+          bgPreview.node,
+          el('div', { class: 'fbts-col' }, [
+            el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [bgPick.btn, bgClear]),
+            bgPick.input,
+            bgWhere.node,
+          ]),
+        ]),
+        el('div', { class: 'fbts-col', style: 'margin-top:9px' }, [bgFit.node, bgPos.node, bgOpacity.node, bgDim.node]),
+        el('div', {
+          class: 'fbts-note',
+          text: 'The picture is saved inside the theme, so it travels with a .fbtheme file and needs no hosting. That also means a big picture makes a big theme file: under about 200 KB keeps saving quick, and under 2 MB always works. Dim adds a dark veil; opacity lets the theme colour show through.',
+        }),
+      ], { actions: [headLink('Reset', 'Remove the background picture', function () {
+        state.background = clone(DEFAULT_BACKGROUND)
+        commit('Background cleared')
+        renderBackground()
+      })] }),
+    )
+
+    /*
+     * The minimise / maximise / close buttons.
+     *
+     * They have no custom property to set - the app paints them with
+     * `color: var(--faint)` and hardcodes #fff for the close button's hover -
+     * so they are reached by a rule in the page stylesheet and edited through
+     * the picker's callback mode.
+     */
+    var windowRows = []
+
+    function windowRow(key, labelText, hint) {
+      var swatch = el('button', { class: 'fbts-swatchinput', type: 'button', title: 'Pick a colour' })
+      var hexRead = el('span', { class: 'fbts-author' })
+      var reset = el('button', {
+        class: 'fbts-mini', title: 'Follow the theme again', text: '\u21ba',
+        onclick: function () {
+          state.window[key] = ''
+          commit('Window buttons reset')
+          renderWindowRows()
+          showToast(labelText + ' follows the theme again')
+        },
+      })
+      swatch.addEventListener('click', function () {
+        picker.open(
+          {
+            label: labelText,
+            tokens: [],
+            solidOnly: true,
+            initial: { color: state.window[key] || resolveTokenColor('--faint') },
+            onChange: function (hexValue, a) {
+              state.window[key] = toCss({ hex: hexValue, a: a == null ? 1 : a })
+              commit()
+              renderWindowRows()
+            },
+          },
+          swatch,
+        )
+      })
+      var row = { key: key, swatch: swatch, hexRead: hexRead, node: null }
+      row.node = el('div', { class: 'fbts-row' }, [
+        el('div', { class: 'fbts-row-label', title: hint || labelText }, [
+          el('span', { text: labelText }),
+          el('code', { text: hint || '' }),
+        ]),
+        swatch,
+        hexRead,
+        reset,
+      ])
+      windowRows.push(row)
+      return row.node
+    }
+
+    function renderWindowRows() {
+      windowRows.forEach(function (r) {
+        var v = state.window[r.key]
+        r.swatch.style.background = v || resolveTokenColor('--faint')
+        r.swatch.classList.toggle('empty', !v)
+        r.hexRead.textContent = v ? 'set' : 'theme'
+      })
+    }
+
+    pagePane.appendChild(
+      group('Window buttons', [
+        el('div', {
+          class: 'fbts-note',
+          style: 'margin:0 0 9px',
+          text: 'The minimise, maximise and close buttons in the corner. They follow the theme\u2019s faint text colour until you set one here.',
+        }),
+        windowRow('ink', 'Button colour', '.window-control'),
+        windowRow('hoverInk', 'Hover icon', '.window-control:hover'),
+        windowRow('hoverBg', 'Hover background', '.window-control:hover'),
+        windowRow('closeInk', 'Close icon on hover', '.window-control-close:hover'),
+        windowRow('closeBg', 'Close background on hover', '.window-control-close:hover'),
+      ], {
+        actions: [headLink('Reset', 'Hand all five back to the theme', function () {
+          state.window = clone(DEFAULT_WINDOW)
+          commit('Window buttons reset')
+          renderWindowRows()
+        })],
+      }),
+    )
+
+    renderLogo()
+    renderBackground()
+    renderWindowRows()
+    pageRefresh = function () {
+      renderLogo()
+      renderBackground()
+      renderWindowRows()
+    }
+
+    /*
+     * ================================================================
+     * Community themes
+     * ================================================================
+     *
+     * The list lives in its own asset (assets/community-themes.js), which the
+     * installer writes next to the engine and loads first. It is a plain data
+     * file, so adding a theme is a one-file pull request - and because it ships
+     * with the extension, this tab works with no network at all.
+     */
+    var communityPane = pane('community')
+    var communityRefresh = null
+    var SUBMIT_URL = 'https://github.com/RichardFlp/freebuff-ui/issues/new'
+
+    function communityThemes() {
+      var src = window.__FREEBUFF_THEME_COMMUNITY__
+      var list = (src && src.themes) || []
+      var out = []
+      for (var i = 0; i < list.length; i++) {
+        var e = list[i]
+        if (!e) continue
+        var theme = null
+        try {
+          // A share code is preferred when present: it survives being pasted
+          // into a file more or less anywhere.
+          if (e.shareCode) theme = parseThemeText(e.shareCode)
+          else if (e.theme) theme = normalizeState(e.theme)
+        } catch (err) {
+          theme = null
+        }
+        if (!theme) continue
+        theme.name = e.name || theme.name
+        out.push({ id: e.id || 'community-' + i, name: theme.name, author: e.author || '', note: e.note || '', theme: theme })
+      }
+      return out
+    }
+
+    /** Hex strings for a thumbnail, resolved through the theme's own preset. */
+    function previewColors(s) {
+      var out = {}
+      var p = s.preset !== 'default' ? PRESET_BY_ID[s.preset] : null
+      if (p && p.colors) for (var k in p.colors) out[k] = p.colors[k]
+      for (var c in s.colors) out[c] = toCss(s.colors[c])
+      return out
+    }
+
+    function applyThemeObject(next, label) {
+      state = normalizeState(next)
+      applyState()
+      saveState(state, true)
+      rebuild()
+      showToast('Applied "' + label + '"')
+    }
+
+    var community = communityThemes()
+    var communityGrid = el('div', { class: 'fbts-presets' })
+    var communityEmpty = el('div', {
+      class: 'fbts-note',
+      text: 'No community themes are bundled with this build.',
+      style: 'margin:0',
+    })
+    var communityCards = {}
+    var communityActiveId = ''
+
+    function renderCommunity() {
+      for (var id in communityCards) {
+        communityCards[id].card.classList.toggle('active', id === communityActiveId)
+      }
+    }
+
+    community.forEach(function (entry) {
+      var card = el('div', { class: 'fbts-preset', title: 'Apply ' + entry.name })
+      var thumb = el('div', { class: 'fbts-thumb', style: thumbStyle({ colors: previewColors(entry.theme) }) }, thumbParts())
+      card.appendChild(thumb)
+      card.appendChild(el('div', { class: 'fbts-preset-name', text: entry.name }))
+      if (entry.author) card.appendChild(el('div', { class: 'fbts-author', text: 'by ' + entry.author }))
+      card.addEventListener('click', function () {
+        communityActiveId = entry.id
+        applyThemeObject(entry.theme, entry.name)
+        renderCommunity()
+      })
+      communityGrid.appendChild(card)
+      communityCards[entry.id] = { card: card, entry: entry }
+    })
+
+    communityPane.appendChild(
+      group(community.length ? 'Community themes' : 'Community themes', [
+        el('div', {
+          class: 'fbts-community-note',
+          html:
+            'Themes made by other people, shipped inside the extension. Click one to apply it - it ' +
+            'overwrites the theme you are editing, so save yours first if you want to keep it.',
+        }),
+        community.length ? communityGrid : communityEmpty,
+      ], {
+        actions: community.length
+          ? [headLink('Save one', 'Save the theme you are looking at as a file', function () {
+              download(JSON.stringify(themeDocument(state), null, 2), themeFileName(state.name))
+              showToast('Saved ' + themeFileName(state.name))
+            })]
+          : [],
+      }),
+    )
+
+    if (community.length) {
+      var first = community[0]
+      if (first.note) {
+        communityPane.appendChild(
+          group('About ' + first.name, [
+            el('div', { class: 'fbts-community-note', text: first.note }),
+            el('div', { class: 'fbts-note', text: 'Submitted by ' + (first.author || 'an anonymous contributor') + '.' }),
+          ]),
+        )
+      }
+    }
+
+    /* ---- submit one ---- */
+    function submitUrl() {
+      var name = state.name || 'Untitled'
+      var body = [
+        '### Theme name',
+        name,
+        '',
+        '### What it is',
+        'One or two lines about the look, and anything it is based on.',
+        '',
+        '### Sharing it',
+        'Export it with Save .fbtheme, then drag the file into this issue.',
+        'You can paste the Share code too - either works.',
+        '',
+        '### Checklist',
+        '- [ ] I attached the .fbtheme file (or pasted the share code)',
+        '- [ ] It is my own work, or I have permission to share it',
+        '- [ ] The theme name is set in the editor',
+        '',
+        'Thank you. Accepted themes are added to the Community tab of the next release.',
+      ].join('\n')
+      return SUBMIT_URL + '?title=' + encodeURIComponent('Community theme: ' + name) + '&body=' + encodeURIComponent(body)
+    }
+
+    communityPane.appendChild(
+      group('Submit your own', [
+        el('div', {
+          class: 'fbts-community-note',
+          html:
+            'Three steps. <b>1.</b> Set the theme name. <b>2.</b> Save it as a .fbtheme file. ' +
+            '<b>3.</b> Open the submission page and drag the file in.',
+        }),
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          el('button', {
+            class: 'fbts-btn primary', type: 'button', text: 'Open the submission page',
+            onclick: function () {
+              try {
+                window.open(submitUrl(), '_blank', 'noopener')
+              } catch (e) {}
+              showToast('Opening GitHub')
+            },
+          }),
+          el('button', {
+            class: 'fbts-btn', type: 'button', text: 'Save .fbtheme',
+            onclick: function () {
+              download(JSON.stringify(themeDocument(state), null, 2), themeFileName(state.name))
+              showToast('Saved ' + themeFileName(state.name))
+            },
+          }),
+          el('button', {
+            class: 'fbts-btn', type: 'button', text: 'Copy share code',
+            onclick: function () { copyText(shareCode(state), 'Share code copied') },
+          }),
+        ]),
+        el('div', {
+          class: 'fbts-note',
+          text: 'The submission page opens in your browser and is pre-filled with a short form. Nothing is sent anywhere until you press Submit there.',
+        }),
+      ]),
+    )
+
+    communityRefresh = renderCommunity
+    renderCommunity()
 
     /* ---- Advanced tab ---- */
     var advPane = pane('advanced')
@@ -2840,10 +4030,7 @@
       // The generated boxes only; the import box belongs to whoever is typing.
       exportArea.value = JSON.stringify(themeDocument(state), null, 2)
       shareInput.value = shareCode(state)
-      // Name the preset actually in use - 'default' is a real preset (Freebuff
-      // Default), so reporting it as "custom" was just confusing.
-      var inUse = PRESET_BY_ID[state.preset]
-      schemeLabel.textContent = 'v' + VERSION + '  \u00b7  ' + (inUse ? inUse.label : 'custom')
+      refreshVersionLabel()
     }
 
     function rebuild() {
@@ -2857,7 +4044,7 @@
             var colorInput = row.querySelector('.fbts-swatchinput')
             if (colorInput) {
               var c = currentColorFor(token)
-              colorInput.style.background = toCss(c)
+              colorInput.style.background = fillFor(token)
               var txt = row.querySelector('input[type=text]')
               if (txt) txt.value = c.hex
               var alpha = row.querySelector('input[type=range]')
@@ -2873,6 +4060,10 @@
       nameInput.value = state.name || ''
       refreshKnobs()
       refreshSpots()
+      // The logo, background and community panes show state rather than edit
+      // it directly, so an imported theme has to push them a redraw.
+      if (pageRefresh) pageRefresh()
+      if (communityRefresh) communityRefresh()
       refreshActive()
     }
 
@@ -2933,10 +4124,16 @@
     refreshKnobs()
     refreshActive()
 
-    // One quiet check per session, well clear of the app's own startup work.
+    // One quiet check per session, well clear of the app's own startup work,
+    // then a poll so a session left open still hears about a release. The
+    // hourly guard inside checkForUpdates() decides whether the poll actually
+    // asks anyone.
     setTimeout(function () {
       checkForUpdates(false)
     }, 2500)
+    setInterval(function () {
+      checkForUpdates(false)
+    }, CHECK_POLL)
 
     // Small surface for power users and for the sandbox tests.
     window.__FREEBUFF_THEME_STUDIO_API__ = {
