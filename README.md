@@ -377,3 +377,6 @@ python -m http.server 8199 --bind 127.0.0.1
 - The editor also appears in Freebuff's separate thread windows, which is intended.
 - This is an unofficial tool, not made by Freebuff. The README says so at the top, the
   Theme Studio header says so, and the installer prints it when it runs.
+- The update check is the only thing here that talks to the internet, and it only fetches
+  a 900-byte file from `cdn.jsdelivr.net` once a day at most. It sends nothing about you
+  or your Freebuff install. Skipping a version is remembered in a cookie, never online.
