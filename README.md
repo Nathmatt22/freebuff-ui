@@ -341,21 +341,30 @@ CSS as `text/plain` with `X-Content-Type-Options: nosniff`, and a browser refuse
 a cross-origin stylesheet that is not `text/css`. jsDelivr serves the same file as
 `text/css`, so no CORS and no extra hosting are needed.
 
-jsDelivr lets browsers keep a file for a week, so the request carries a per-day query
-string. That means at most one real request per day, and a new release is picked up within
-hours rather than within a week.
+jsDelivr sends `max-age=604800` for browser caches, so the request carries a per-hour query
+string. jsDelivr ignores query strings for its own cache, so this only stops a browser from
+holding a stale copy for a week; a check at most every six hours therefore always gets a
+current answer, within an hour of any change.
 
 If the file cannot be loaded - offline, CDN trouble, or a future Freebuff policy that
 blocks it - the check fails quietly and nothing is shown.
 
-**Releasing a new version** means three edits, then a push:
+**Releasing a new version** means three edits, a push, and one cache purge:
 
 1. `VERSION` in `injector/assets/theme-engine.js`.
 2. `version` in `injector/main.go`.
 3. `--fbts-remote-version` in `update.css`.
 
-Then build, attach the new `.exe` to a `vX.Y.Z` release on GitHub, and push to `main`.
-Installed copies notice the new version within six hours of their next launch.
+Then build, push to `main`, attach the new `.exe` to a `vX.Y.Z` release on GitHub, and tell
+jsDelivr to drop its copy of the feed:
+
+```bash
+curl https://purge.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css
+```
+
+Without the purge the CDN keeps serving the old feed for up to twelve hours (`s-maxage`),
+which is the one thing that should never be stale. Installed copies then notice the new
+version on their next check, at most six hours later.
 
 ### Where your theme is stored
 

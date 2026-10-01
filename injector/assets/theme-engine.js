@@ -1418,10 +1418,11 @@
 
       var link = document.createElement('link')
       link.rel = 'stylesheet'
-      // jsDelivr lets the browser keep this for a week and its edge for 12
-      // hours, so ask with a per-day address: one real request a day, and a
-      // new release is noticed within that window rather than within a week.
-      link.href = UPDATE_FEED + '?d=' + new Date().toISOString().slice(0, 10)
+      // jsDelivr ignores query strings for its own cache, so this parameter is
+      // here to keep the *browser* honest: it would otherwise keep this file
+      // for a week. A per-hour address caps browser staleness at an hour, while
+      // the CDN's own entry is purged as part of publishing a release.
+      link.href = UPDATE_FEED + '?h=' + new Date().toISOString().slice(0, 13)
       var settled = false
 
       function settle(version) {
