@@ -18,6 +18,10 @@ You do not need to know how to code to use it.
 
 ---
 
+https://github.com/user-attachments/assets/6c9b741f-3b19-4529-8625-d19bba4dfdb3
+
+---
+
 ## What you get
 
 - A **palette icon** in Freebuff's left sidebar, next to the other icons.
