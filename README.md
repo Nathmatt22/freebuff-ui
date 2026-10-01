@@ -39,6 +39,10 @@ https://github.com/user-attachments/assets/6c9b741f-3b19-4529-8625-d19bba4dfdb3
 - **Your own logo**: replace Freebuff's mark with an SVG, PNG or JPG.
 - **A background picture**, with fit, position, opacity and dimming. It travels inside
   the theme file, so nothing needs hosting.
+- **Colours survive restarts.** Layout, gradients, window buttons, the chosen preset and
+  the raw CSS box are all remembered when you close and reopen Freebuff. A background
+  picture or a logo lasts for the session - see
+  [Logo and background](#logo-and-background) for why, and how to keep one for good.
 - **Window buttons**: set the colour of the minimise, maximise and close buttons in the
   corner, which follow the theme out of the box but can be overridden on their own.
 - **Community themes**: a tab of themes other people have made, and a one-click way to
@@ -202,9 +206,20 @@ stretches; **Position** anchors it; **Opacity** lets the theme colour through an
 adds a dark veil over it.
 
 The picture is stored inside the theme, so it is carried by a `.fbtheme` file and needs no
-hosting anywhere. The trade is size: a picture under about 200 KB keeps saving quick, and
-files up to 2 MB are accepted. If a theme gets too big to save, the panel says so instead
-of quietly failing.
+hosting anywhere. Big pictures are scaled down on the way in - to about 150 KB, at most
+2560 pixels on the long side - so nothing enormous is ever handed to the renderer.
+
+**A picture lasts for the session.** Freebuff serves its window from a new local port every
+time it starts, and the only storage that survives that is cookies - which are sent with
+every request the app makes. A picture big enough to be worth having would be a hundred
+times larger than the app can carry, and the app's own server starts refusing requests
+once its headers get too big, which leaves the window blank. So pictures are kept where
+they cannot hurt: colours and layout are remembered between launches, a picture is not.
+
+To keep a picture for good, either **Export** the theme to a `.fbtheme` file and open it
+again when you want it, or bake it into the install with the installer -
+`FreebuffThemeInjector.exe --theme my-theme.fbtheme` makes it part of Freebuff itself, so it
+comes back on every launch with no cookies involved.
 
 Setting a colour's opacity to anything below fully solid lets the app behind it show
 through, which is the point - but Theme Studio itself stays opaque, so its controls never
@@ -356,8 +371,7 @@ click **Choose a file** and pick a `.fbtheme` file, or drop the file on the page
 Run `FreebuffThemeInjector.exe --uninstall`. This removes the palette icon, deletes the
 editor, and puts the original file back exactly as it was. Freebuff returns to normal.
 
-Your saved theme stays in Freebuff's settings, but it stops being applied because the
-editor is gone.
+The stored theme is deleted with it, so nothing is left behind in Freebuff's cookie jar.
 
 ---
 
@@ -373,7 +387,8 @@ Freebuff updates replace the interface file, which removes the icon. Run
 creates duplicates.
 
 **I want to start over.**
-Use **Reset all** in the bottom bar of the page.
+Use **Reset all** in the bottom bar of the page, or run
+`FreebuffThemeInjector.exe --reset-theme` to clear the stored theme entirely.
 
 **My theme is there but the window buttons / logo / background do not look right.**
 Check the **Logo and background** tab first: each group has a **Reset** in its header
@@ -383,8 +398,26 @@ that hands that part back to the theme.
 Press `Ctrl+R` and check again. Freebuff picks a different local port every time it
 starts, so anything the page can only see from one port is gone - which is why themes are
 saved in the browser's cookie store for Freebuff itself rather than in page storage.
-If a theme is very large (a big background picture), saving can be refused; the panel says
-so when it happens.
+If the panel says a theme could not be read, nothing has been overwritten: the stored copy
+is still there, and an untouched default is never saved over it.
+
+**A background picture or logo is gone after a restart.**
+That is the design, and it is deliberate - see
+[Logo and background](#logo-and-background). Colours, layout and gradients come back.
+
+**Freebuff opens on an empty grey window and nothing brings it back.**
+This was caused by an older version of the editor saving a picture into cookies: those
+cookies are sent with every request, and the app's own web server refuses a request whose
+headers are too big, so the window never renders - and uninstalling the editor does not
+help, because the cookies stay in the profile. Run:
+
+```
+FreebuffThemeInjector.exe --reset-theme --restart
+```
+
+That closes Freebuff, deletes only the theme cookies (everything else in the profile is
+left alone), and starts it again. Version 1.3.3 and later can never cause this: pictures
+are no longer stored in cookies, and the stored theme has a hard size ceiling.
 
 **Something looks broken and I want it gone.**
 Run `FreebuffThemeInjector.exe --uninstall`. This always works, even if the page itself
@@ -408,11 +441,13 @@ have it reopened for you.
 | Option | What it does |
 | --- | --- |
 | *(no options)* | Install the theme editor |
-| `--status` | Check whether it is installed |
-| `--uninstall` | Remove it and restore the original file |
+| `--status` | Check whether it is installed, and how big the stored theme is |
+| `--uninstall` | Remove it, restore the original file and clear the stored theme |
+| `--reset-theme` | Delete only the stored theme cookies - the fix for a blank grey window |
+| `--repair` | Reinstall the current files and clear the stored theme |
 | `--theme FILE` | Use a theme file as the starting theme for new sessions |
 | `--path DIR` | Target a specific Freebuff folder |
-| `--restart` | Reopen Freebuff after installing |
+| `--restart` | Close Freebuff if it is running, then start it again |
 | `--open` | Open the interface folder in File Explorer |
 | `--quiet` | Print less |
 
@@ -422,6 +457,7 @@ Examples:
 FreebuffThemeInjector.exe --restart
 FreebuffThemeInjector.exe --theme my-theme.json
 FreebuffThemeInjector.exe --status
+FreebuffThemeInjector.exe --repair --restart
 FreebuffThemeInjector.exe --uninstall
 ```
 
@@ -551,23 +587,39 @@ In cookies. Freebuff chooses a new port every time it starts, and browser storag
 to the combination of address and port, so ordinary storage would be lost on every restart.
 Cookies are tied to the address only, so they survive.
 
-A theme can be larger than one cookie, so it is spread over a numbered series -
-`fbts_theme_0`, `fbts_theme_1`, … - with `fbts_theme_n` saying how many to expect. The
-payload is base64url-encoded before it is split, which looks wasteful (it adds a third)
-and is not: the naive approach was to chunk the JSON itself, and because a browser escapes
-`"`, `{`, `}` and `:` when it stores a cookie value, a 3200-character chunk landed around
-6000 bytes, over the 4096-byte cookie limit, and was dropped without a word. The counter
-cookie still said how many chunks to expect, so the next load found one missing and quietly
-fell back to nothing. Base64url uses only unescaped characters, so a 3800-character chunk
-is exactly 3800 bytes.
+Cookies have a cost that decides how much can be stored. They are sent with **every**
+request, and the server that serves Freebuff's window answers HTTP 431 - and the window
+stays blank - once the request headers pass 16 KB. Measured against the Bun that ships with
+Freebuff, a 16,000-byte cookie header is fine and a 24,000-byte one is refused. The stored
+theme therefore has a hard ceiling of two chunks, 6.8 KB, which is comfortably more than
+the largest theme the panel can build (overriding all 101 colours it lists comes to
+6.4 KB) while leaving the app's own cookies plenty of room.
 
-A background picture is far too big for that, so it lives in its own series (`fbts_img_0`,
-…, `fbts_img_n`). Keeping it separate means changing a colour does not rewrite the picture.
+The payload is base64url-encoded before it is split, which looks wasteful (it adds a
+third) and is not: the naive approach was to chunk the JSON itself, and because a browser
+escapes `"`, `{`, `}` and `:` when it stores a cookie value, a 3200-character chunk landed
+around 6000 bytes, over the 4096-byte cookie limit, and was dropped without a word.
+
+Each save goes to a fresh generation and the counter cookie - `fbts_theme_n`, which reads
+`<generation>:<count>,` for example `4:2` - is switched to it in a single write. The
+previous save stays complete and readable until the new one is, so closing or killing
+Freebuff in the middle of a save can no longer cost the theme that was already there.
+
+Nothing is written until something has actually changed. That matters because of the
+worst bug this tool has had: if a load came up empty, the engine used to boot on the
+default theme and then save that default at the first click, destroying the theme still
+sitting in the cookies. An untouched default is never saved, and if a stored theme cannot
+be read the panel says so.
 
 Writes are throttled: the first edit after a pause is written at once, and a long drag is
-written at least every 1.5 seconds - the old version reset its timer on every change, so a
+written at least every 1.5 seconds - an older version reset its timer on every change, so a
 continuous drag saved nothing at all until the mouse stopped. The page also flushes on
 being hidden or closed.
+
+Pictures are the one thing that does not go in a cookie, for the 16 KB reason above; they
+live in the theme's session state and in `.fbtheme` files. Versions up to 1.3.2 did store
+one in its own cookie series (`fbts_img_0`, …, `fbts_img_n`), which is what could put a
+quarter of a megabyte into every request; those cookies are read once and then deleted.
 
 ### Building from source
 
@@ -627,7 +679,7 @@ python -m http.server 8199 --bind 127.0.0.1
   a 900-byte file from jsDelivr, at most once an hour. It sends nothing about you or your
   Freebuff install. Skipping a version is remembered in a cookie, never online.
 - A background picture and a custom logo are stored inline in the theme, so a `.fbtheme`
-  file containing one is self-contained but bigger. Under about 200 KB keeps everything
-  quick.
+  file containing one is self-contained but bigger. They last for the session rather than
+  being remembered between launches; `--theme FILE` bakes one in permanently.
 - Community themes are bundled with each release rather than downloaded, so that tab needs
   no network and cannot break if a CDN does.

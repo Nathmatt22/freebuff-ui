@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -42,14 +43,17 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.3.2"
+	version       = "1.3.3"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
 	communityName = "freebuff-theme-community.js"
 	defaultName   = "freebuff-theme-default.js"
-	backupSuffix  = ".freebuff-theme-original.bak"
-	manifestName  = ".freebuff-theme-studio.json"
+	// Past this the request header block approaches the 16 KB the app's own
+	// server accepts, and every request starts failing.
+	cookieDangerBytes = 12000
+	backupSuffix      = ".freebuff-theme-original.bak"
+	manifestName      = ".freebuff-theme-studio.json"
 )
 
 var (
@@ -396,7 +400,7 @@ func uninstall(ui string, quiet bool) error {
 	return nil
 }
 
-func status(ui string) {
+func status(ui, install string) {
 	m := readManifest(ui)
 	html, _ := os.ReadFile(indexPath(ui))
 	injected := strings.Contains(string(html), markerStart)
@@ -418,6 +422,193 @@ func status(ui string) {
 	}
 	if _, err := os.Stat(filepath.Join(assetsDir(ui), defaultName)); err == nil {
 		fmt.Printf("  baked theme file present\n")
+	}
+	checkThemeCookies(install)
+}
+
+// ---------------------------------------------------------- theme cookies ---
+
+/*
+ * The theme lives in cookies, because they are the only store that survives a
+ * launch: Freebuff serves its UI from a fresh loopback port every time, so
+ * localStorage (which is per-origin, and therefore per-port) does not carry
+ * over.
+ *
+ * Cookies have a cost the theme engine has to respect: they are sent with
+ * every request, and the Bun server that serves the UI answers HTTP 431 - and
+ * the window stays blank and grey - once the request header block passes
+ * 16 KB. An early version stored pictures in cookies as well, which could put
+ * a quarter of a megabyte into that header, and then no uninstall helped
+ * because the cookies were still in the profile.
+ *
+ * So this is the way out. Chromium keeps its cookie jar in a small SQLite file
+ * inside the Freebuff profile; the install ships its own Bun, and Bun reads
+ * SQLite natively, so the installer can delete exactly the theme cookies and
+ * leave everything else - including Freebuff's own cookies - alone.
+ */
+
+const cookieDBScript = `(async () => {
+  const { Database } = await import('bun:sqlite')
+  const db = new Database(process.env.FREEBUFF_COOKIE_DB)
+  const sql = "select count(*) as n, coalesce(sum(length(value)), 0) as b from cookies where name like 'fbts%'"
+  const before = db.query(sql).get()
+  const out = { cookies: before.n, bytes: before.b, action: process.env.FBTS_COOKIE_ACTION }
+  if (process.env.FBTS_COOKIE_ACTION === 'clear') {
+    db.run("delete from cookies where name like 'fbts%'")
+    out.remaining = db.query(sql).get().n
+  }
+  console.log(JSON.stringify(out))
+})()`
+
+type cookieReport struct {
+	Cookies   int    `json:"cookies"`
+	Bytes     int    `json:"bytes"`
+	Action    string `json:"action"`
+	Remaining int    `json:"remaining"`
+}
+
+func profileCookieDBs() []string {
+	var out []string
+	for _, root := range []string{os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")} {
+		if root == "" {
+			continue
+		}
+		for _, name := range []string{"Freebuff", "@codebufffreebuff-desktop", "freebuff-desktop", "Freebuff Desktop"} {
+			p := filepath.Join(root, name, "Network", "Cookies")
+			b, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			// Only the jar that actually has our cookies in it.
+			if bytes.Contains(b, []byte("fbts")) {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
+func bunBinary(install string) string {
+	for _, p := range []string{
+		filepath.Join(install, "resources", "bun", "bun.exe"),
+		filepath.Join(install, "resources", "bun", "bun-baseline.exe"),
+		filepath.Join(install, "resources", "orchestrator", "bun.exe"),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("bun"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// runCookieScript opens a profile cookie jar and either reports or clears the
+// theme cookies in it.
+func runCookieScript(bun, db, action string) (*cookieReport, error) {
+	cmd := exec.Command(bun, "-e", cookieDBScript)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cmd.Env = append(os.Environ(), "FREEBUFF_COOKIE_DB="+db, "FBTS_COOKIE_ACTION="+action)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	line := strings.TrimSpace(string(out))
+	if i := strings.LastIndexByte(line, '\n'); i >= 0 {
+		line = strings.TrimSpace(line[i+1:])
+	}
+	var rep cookieReport
+	if err := json.Unmarshal([]byte(line), &rep); err != nil {
+		return nil, fmt.Errorf("could not read the cookie check output: %w", err)
+	}
+	return &rep, nil
+}
+
+// stopFreebuff asks the app to close and waits for it, because Chromium holds
+// the cookie jar in memory and would write it back over any changes we make.
+func stopFreebuff(quiet bool) bool {
+	if !freebuffRunning() {
+		return true
+	}
+	if !quiet {
+		info("Asking Freebuff to close\u2026")
+	}
+	cmd := exec.Command("taskkill", "/IM", "Freebuff.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Run()
+	for i := 0; i < 60; i++ {
+		if !freebuffRunning() {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if !quiet {
+		warn("Freebuff is still running - close it by hand and try again")
+	}
+	return false
+}
+
+// clearThemeCookies is the escape hatch for an install whose theme cookies are
+// too big for the app to serve its own UI. Returns how many were removed.
+func clearThemeCookies(install string, quiet bool) (int, bool) {
+	dbs := profileCookieDBs()
+	if len(dbs) == 0 {
+		return 0, true
+	}
+	bun := bunBinary(install)
+	if bun == "" {
+		if !quiet {
+			warn("Could not find the Bun runtime that ships with Freebuff, so the cookies were left alone")
+			fmt.Printf("       Delete these files by hand: %s\n", strings.Join(dbs, ", "))
+		}
+		return 0, false
+	}
+	if !stopFreebuff(quiet) {
+		return 0, false
+	}
+	removed := 0
+	for _, db := range dbs {
+		rep, err := runCookieScript(bun, db, "clear")
+		if err != nil {
+			if !quiet {
+				warn("Could not open %s: %v", db, err)
+			}
+			continue
+		}
+		removed += rep.Cookies
+		if !quiet {
+			ok("Removed %d theme cookies (%d bytes) from %s", rep.Cookies, rep.Bytes, filepath.Base(filepath.Dir(filepath.Dir(db))))
+		}
+	}
+	return removed, true
+}
+
+// checkThemeCookies warns when the stored theme has grown past the size the
+// app's own server will accept.
+func checkThemeCookies(install string) {
+	dbs := profileCookieDBs()
+	if len(dbs) == 0 {
+		return
+	}
+	bun := bunBinary(install)
+	if bun == "" {
+		return
+	}
+	for _, db := range dbs {
+		rep, err := runCookieScript(bun, db, "report")
+		if err != nil {
+			continue
+		}
+		if rep.Cookies == 0 {
+			continue
+		}
+		if rep.Bytes > cookieDangerBytes {
+			warn("Theme cookies: %d cookies, %d bytes - too big for the app to stay healthy", rep.Cookies, rep.Bytes)
+			fmt.Println("       Run with --reset-theme to clear them.")
+			continue
+		}
+		fmt.Printf("  theme     %d cookies, %d bytes\n", rep.Cookies, rep.Bytes)
 	}
 }
 
@@ -457,7 +648,9 @@ func main() {
 		uninstallFlag = flag.Bool("uninstall", false, "remove the injected UI and restore the original index.html")
 		statusFlag    = flag.Bool("status", false, "show whether Theme Studio is installed")
 		themeFlag     = flag.String("theme", "", "path to a .fbtheme or .json theme to bake in as the default")
-		restartFlag   = flag.Bool("restart", false, "relaunch Freebuff after installing")
+		resetFlag     = flag.Bool("reset-theme", false, "delete the stored theme cookies (the fix for an app that opens on a blank window)")
+		repairFlag    = flag.Bool("repair", false, "reinstall the current files and clear the stored theme cookies")
+		restartFlag   = flag.Bool("restart", false, "close Freebuff if it is running and start it again")
 		openFlag      = flag.Bool("open", false, "open the UI folder in Explorer")
 		quietFlag     = flag.Bool("quiet", false, "less output")
 	)
@@ -474,7 +667,11 @@ func main() {
 		fmt.Println("  FreebuffThemeInjector.exe --restart")
 		fmt.Println("  FreebuffThemeInjector.exe --theme my-theme.json")
 		fmt.Println("  FreebuffThemeInjector.exe --status")
+		fmt.Println("  FreebuffThemeInjector.exe --repair --restart")
 		fmt.Println("  FreebuffThemeInjector.exe --uninstall")
+		fmt.Println()
+		fmt.Println("If Freebuff opens on an empty grey window, run --reset-theme. That is")
+		fmt.Println("caused by a theme too big for the app to carry, and clearing it fixes it.")
 	}
 	flag.Parse()
 
@@ -493,7 +690,21 @@ func main() {
 
 	switch {
 	case *statusFlag:
-		status(ui)
+		status(ui, install)
+		return
+
+	case *resetFlag:
+		if !quiet {
+			step("Clearing the stored theme")
+		}
+		if _, ok := clearThemeCookies(install, quiet); !ok {
+			os.Exit(1)
+		}
+		fmt.Println()
+		ok("Theme cookies cleared. Freebuff should open normally again.")
+		if *restartFlag {
+			relaunch(install)
+		}
 		return
 
 	case *uninstallFlag:
@@ -504,8 +715,15 @@ func main() {
 			warn("%v", err)
 			os.Exit(1)
 		}
+		// The theme cookies are ours, and they are the one thing an uninstall
+		// used to leave behind - including the oversized ones that make the app
+		// impossible to open. Take them with us.
+		clearThemeCookies(install, quiet)
 		fmt.Println()
-		ok("Freebuff is back to stock. Reload the app (Ctrl+R) if it is open.")
+		ok("Freebuff is back to stock. Restart it if it is running.")
+		if *restartFlag {
+			relaunch(install)
+		}
 		return
 	}
 
@@ -533,6 +751,11 @@ func main() {
 		}
 	}
 
+	if *repairFlag {
+		if !quiet {
+			step("Repairing the installed files")
+		}
+	}
 	if !quiet {
 		step("Installing theme engine")
 	}
@@ -544,6 +767,13 @@ func main() {
 		ok("Injected into resources/orchestrator/ui/index.html")
 		ok("Wrote assets/%s (%d bytes)", engineName, len(engineJS))
 		ok("Wrote assets/%s (%d bytes)", communityName, len(communityJS))
+	}
+
+	if *repairFlag {
+		// The injected files are now whatever this build carries; the stored
+		// theme is the other half of a repair, and the only part of it that can
+		// stop the app from opening at all.
+		clearThemeCookies(install, quiet)
 	}
 
 	if *openFlag {
@@ -559,7 +789,8 @@ func main() {
 		fmt.Println("  Open Freebuff - a " + colBold + "palette icon" + colReset + " appears in the sidebar rail.")
 		fmt.Println("  Click it for presets, per-token colour pickers, layout and raw CSS.")
 		fmt.Println()
-		fmt.Printf("  %sThemes are saved in a cookie, so they survive restarts.%s\n", colDim, colReset)
+		fmt.Printf("  %sThe theme is remembered between launches; a background picture lasts for the session.%s\n", colDim, colReset)
+		fmt.Printf("  %sBlank grey window? Run this again with --reset-theme.%s\n", colDim, colReset)
 		fmt.Printf("  %sCtrl+Alt+Shift+F reopens the page, Esc closes it.%s\n", colDim, colReset)
 		fmt.Printf("  %sUnofficial extension: not made by, or endorsed by, Freebuff.%s\n", colDim, colReset)
 		fmt.Println()
@@ -575,6 +806,7 @@ func main() {
 			if !quiet {
 				step("Relaunching Freebuff")
 			}
+			stopFreebuff(quiet)
 			relaunch(install)
 		}
 	} else if *restartFlag {

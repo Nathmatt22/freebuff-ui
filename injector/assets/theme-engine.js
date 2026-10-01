@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.3.2'
+  var VERSION = '1.3.3'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -77,15 +77,34 @@
    *
    * So the payload is base64url-encoded before it is chunked. Base64url uses
    * only A-Z a-z 0-9 - and _, none of which encodeURIComponent touches, so the
-   * encoded length equals the raw length and a 3800-character chunk is really
-   * 3800 bytes. Base64 grows the payload by a third, which is a fine price for
+   * encoded length equals the raw length and a 3400-character chunk is really
+   * 3400 bytes. Base64 grows the payload by a third, which is a fine price for
    * knowing exactly how big it will be.
    */
-  var COOKIE_CHUNK = 3800
-  var COOKIE_MAX_THEME_CHUNKS = 24
-  var IMG_PREFIX = 'fbts_img'
-  var IMG_COUNT = 'fbts_img_n'
-  var COOKIE_MAX_IMAGE_CHUNKS = 80
+  var COOKIE_CHUNK = 3400
+  var COOKIE_MAX_THEME_CHUNKS = 2
+
+  /*
+   * Why the theme budget is two chunks and nothing else is stored.
+   *
+   * Cookies are sent with every single request, and Freebuff's UI is served by
+   * a Bun server on loopback (uWebSockets underneath) that answers HTTP 431 -
+   * Request Header Fields Too Large - once the request header block passes
+   * 16 KB. Measured against the bundled Bun 1.4.2: a 16,000-byte Cookie header
+   * is fine, 24,000 gets a 431. A 431 on the document request means the app
+   * never renders and the window stays empty and grey - and no uninstall or
+   * repair of the injected files helps, because the offending cookies are still
+   * in the profile. That is the reported "installed a custom picture, now I get
+   * a grey window" bug.
+   *
+   * Two chunks is 6.8 KB, which holds the largest theme the panel can build
+   * (all 101 registry tokens overridden is 6.4 KB encoded) with the whole of
+   * the app's own cookie jar on top. Pictures are not stored in cookies at all;
+   * see the note on pictures below.
+   */
+  /* Cookie series written by 1.3.2 and earlier, which stored pictures in
+   * cookies. They are read once and then removed for good. */
+  var DEAD_SERIES = ['fbts_img', 'fbts_logo']
 
   /* ------------------------------------------------------------------ *
    * Token registry
@@ -745,6 +764,27 @@
    * ------------------------------------------------------------------ */
 
   /*
+   * Pictures, and the size they are allowed to be.
+   *
+   * A picture is a data URL, and that string ends up twice over: once in the
+   * page stylesheet as a background-image for the renderer to decode, and once
+   * in localStorage. A 2 MB photo is a 2.7 MB data URL, which is more than any
+   * renderer should be asked to paint, and it makes a .fbtheme file that is
+   * awkward to send to anyone. So every picture is re-encoded to a budget on
+   * the way in - 2560 px on the long side and about 150 KB for a background,
+   * 640 px and 40 KB for a logo - and re-encoded only when it is over budget,
+   * so a small PNG keeps its pixels and transparency.
+   */
+  var IMAGE_KINDS = {
+    background: { maxSide: 2560, maxBytes: 150 * 1024, minSide: 640, lossy: true },
+    logo: { maxSide: 640, maxBytes: 40 * 1024, minSide: 160, lossy: false },
+  }
+  /* A picture above this is never painted, whatever the state says. Only a
+   * version before the budgets could have stored one, and a data URL that big
+   * is a decode the renderer does not need to do. */
+  var PAINT_MAX_BYTES = 1200 * 1024
+
+  /*
    * A background picture. `image` is a data URL so it travels inside the theme
    * file and needs no hosting; the rest is how it is painted.
    */
@@ -796,6 +836,226 @@
     return s
   }
 
+  function dataUrlBytes(s) {
+    return typeof s === 'string' ? s.length : 0
+  }
+
+  function imageOverBudget(url, kind) {
+    if (!url) return false
+    var limit = IMAGE_KINDS[kind] || IMAGE_KINDS.background
+    return dataUrlBytes(url) > limit.maxBytes
+  }
+
+  /*
+   * Fitting a picture to its budget.
+   *
+   * Only pictures that are over budget are touched at all: a small PNG keeps
+   * its pixels and its transparency, and an animated GIF stays animated. What
+   * is over budget is scaled down and re-encoded until it fits, keeping the
+   * aspect ratio, and never below minSide so a wallpaper does not turn into a
+   * thumbnail. WebP is used when the browser can encode it (it can, in every
+   * Electron this runs in) and JPEG otherwise; the logo stays PNG so a
+   * transparent mark is not filled in with black.
+   */
+  var webpOk = null
+
+  function canEncodeWebp() {
+    if (webpOk === null) {
+      try {
+        var probe = document.createElement('canvas')
+        probe.width = probe.height = 1
+        webpOk = probe.toDataURL('image/webp').indexOf('data:image/webp') === 0
+      } catch (e) {
+        webpOk = false
+      }
+    }
+    return webpOk
+  }
+
+  function fitImage(src, kind, cb) {
+    var limit = IMAGE_KINDS[kind] || IMAGE_KINDS.background
+    var settled = false
+    function done(v) {
+      if (settled) return
+      settled = true
+      cb(v)
+    }
+    if (!src) return done('')
+    var img = new Image()
+    img.onerror = function () { done(null) }
+    img.onload = function () {
+      try {
+        var w = img.naturalWidth || img.width || 0
+        var h = img.naturalHeight || img.height || 0
+        if (!w || !h) return done(cleanDataUrl(src))
+        var mime = limit.lossy ? (canEncodeWebp() ? 'image/webp' : 'image/jpeg') : 'image/png'
+        var scale = Math.min(1, limit.maxSide / Math.max(w, h))
+        var best = null
+        for (var round = 0; round < 9; round++) {
+          var sw = Math.max(1, Math.round(w * scale))
+          var sh = Math.max(1, Math.round(h * scale))
+          var canvas = document.createElement('canvas')
+          canvas.width = sw
+          canvas.height = sh
+          var ctx = canvas.getContext('2d')
+          if (!ctx) break
+          if (mime === 'image/jpeg') {
+            // JPEG has no alpha, and an unpainted canvas is black.
+            ctx.fillStyle = '#000000'
+            ctx.fillRect(0, 0, sw, sh)
+          }
+          ctx.drawImage(img, 0, 0, sw, sh)
+          var qualities = limit.lossy ? [0.85, 0.72, 0.6] : [null]
+          for (var q = 0; q < qualities.length; q++) {
+            var candidate = qualities[q] === null ? canvas.toDataURL(mime) : canvas.toDataURL(mime, qualities[q])
+            if (!candidate || candidate.indexOf('data:image/') !== 0) continue
+            if (!best || dataUrlBytes(candidate) < dataUrlBytes(best)) best = candidate
+            if (dataUrlBytes(candidate) <= limit.maxBytes) return done(candidate)
+          }
+          if (Math.max(sw, sh) <= limit.minSide) break
+          scale *= 0.7
+        }
+        // Nothing fitted: hand back the smallest attempt, so the picture is
+        // still shown this session, and let the save path say it is too big.
+        done(best)
+      } catch (e) {
+        done(null)
+      }
+    }
+    img.src = src
+  }
+
+  /** Re-encode the pictures inside a theme down to their budget, in place. */
+  function shrinkThemeImages(s, cb) {
+    var jobs = []
+    if (s.background && imageOverBudget(s.background.image, 'background')) jobs.push(['background', s.background])
+    if (s.logo && imageOverBudget(s.logo.image, 'logo')) jobs.push(['logo', s.logo])
+    if (!jobs.length) return cb(false)
+    var left = jobs.length
+    var changed = false
+    jobs.forEach(function (job) {
+      fitImage(job[1].image, job[0], function (fitted) {
+        if (fitted && fitted !== job[1].image) {
+          job[1].image = fitted
+          changed = true
+        } else if (!fitted) {
+          job[1].image = ''
+          changed = true
+        }
+        if (--left === 0) cb(changed)
+      })
+    })
+  }
+
+  /**
+   * A picture a version before the budgets stored is dropped rather than drawn:
+   * nothing needs a multi-megabyte data URL in the page, and the state is saved
+   * back without it so the next launch starts clean.
+   */
+  function dropOversizedImages(s) {
+    var dropped = []
+    if (s.background && dataUrlBytes(s.background.image) > PAINT_MAX_BYTES) {
+      s.background.image = ''
+      dropped.push('background picture')
+    }
+    if (s.logo && dataUrlBytes(s.logo.image) > PAINT_MAX_BYTES) {
+      s.logo.image = ''
+      dropped.push('logo')
+    }
+    return dropped
+  }
+
+  /*
+   * Legacy themes.
+   *
+   * Everything a theme file carries is written into a stylesheet, and the
+   * layout map of a theme made by an older version was never checked at all -
+   * a stray `}`, `;` or `/*` in one value was enough to end the declaration
+   * and leak the rest of the map onto unrelated selectors, which is what made
+   * old themes render as a scrambled panel with doubled chrome. Values are now
+   * validated before they are used, and anything that cannot be a plain CSS
+   * value is dropped instead.
+   */
+  var TOKEN_NAME_RE = /^--[a-z0-9][a-z0-9-]*$/i
+
+  function balanced(s, open, close) {
+    var depth = 0
+    for (var i = 0; i < s.length; i++) {
+      if (s[i] === open) depth++
+      else if (s[i] === close) {
+        depth--
+        if (depth < 0) return false
+      }
+    }
+    return depth === 0
+  }
+
+  /** Quotes come in pairs, so an even count is a closed one. Counting beats
+   *  depth here: an opening quote and a closing one are the same character. */
+  function quotesClosed(s, q) {
+    var n = 0
+    for (var i = 0; i < s.length; i++) if (s[i] === q) n++
+    return n % 2 === 0
+  }
+
+  function sanitizeLayoutValue(name, value) {
+    if (!TOKEN_NAME_RE.test(String(name || ''))) return ''
+    var s = value == null ? '' : String(value)
+    s = s.replace(/[\r\n\t]+/g, ' ').trim()
+    if (!s || s.length > 240) return ''
+    if (/[;{}<>]/.test(s)) return ''
+    if (s.indexOf('!') >= 0) return ''
+    if (s.indexOf('\\') >= 0) return ''
+    if (/\/\*/.test(s)) return ''
+    if (/url\s*\(|expression\s*\(|@import|javascript:|var\s*\(\s*--fbts/i.test(s)) return ''
+    if (!balanced(s, '(', ')')) return ''
+    if (!quotesClosed(s, '"')) return ''
+    if (!quotesClosed(s, "'")) return ''
+    return s
+  }
+
+  /** Keep only the layout entries that are safe to write into CSS. */
+  function filterLayout(raw) {
+    var out = {}
+    if (!raw || typeof raw !== 'object') return out
+    for (var k in raw) {
+      var v = sanitizeLayoutValue(k, raw[k])
+      if (v !== '') out[k] = v
+    }
+    return out
+  }
+
+  /** Colours are kept as {hex, a}: a theme file cannot smuggle CSS in a colour. */
+  function normalizeColors(raw) {
+    var out = {}
+    if (!raw || typeof raw !== 'object') return out
+    for (var k in raw) {
+      if (!TOKEN_NAME_RE.test(k)) continue
+      var entry = raw[k]
+      var c = parseColor(entry && entry.hex ? entry.hex : entry)
+      if (!c) continue
+      out[k] = { hex: c.hex, a: num(entry && entry.a, 0, 1, c.a) }
+    }
+    return out
+  }
+
+  /** Only a plain CSS filter, which is what the logo box takes. */
+  function sanitizeFilter(v) {
+    var s = typeof v === 'string' ? v.trim() : ''
+    if (!s || s.length > 120) return ''
+    if (!/^[a-z0-9 .%,#()-]+$/i.test(s)) return ''
+    if (!balanced(s, '(', ')')) return ''
+    return s
+  }
+
+  /** A final gate for anything interpolated into the page stylesheet. */
+  function safeCss(v) {
+    var s = typeof v === 'string' ? v.trim() : ''
+    if (!s || s.length > 400) return ''
+    if (/[;{}<>]/.test(s) || s.indexOf('\\') >= 0 || /\/\*/.test(s)) return ''
+    return s
+  }
+
   function num(v, lo, hi, fallback) {
     var n = Number(v)
     if (!isFinite(n)) return fallback
@@ -830,8 +1090,8 @@
     if (raw && typeof raw === 'object') {
       if (raw.name) s.name = String(raw.name)
       if (raw.preset) s.preset = String(raw.preset)
-      if (raw.colors && typeof raw.colors === 'object') s.colors = raw.colors
-      if (raw.layout && typeof raw.layout === 'object') s.layout = raw.layout
+      if (raw.colors && typeof raw.colors === 'object') s.colors = normalizeColors(raw.colors)
+      if (raw.layout && typeof raw.layout === 'object') s.layout = filterLayout(raw.layout)
       s.gradients = normalizeGradients(raw.gradients)
       if (raw.background && typeof raw.background === 'object') {
         var b = raw.background
@@ -849,7 +1109,7 @@
           image: cleanDataUrl(raw.logo.image),
           size: num(raw.logo.size, 0.25, 3, 1),
           opacity: num(raw.logo.opacity, 0, 1, 1),
-          filter: typeof raw.logo.filter === 'string' ? raw.logo.filter.slice(0, 120) : '',
+          filter: sanitizeFilter(raw.logo.filter),
         }
       }
       if (raw.window && typeof raw.window === 'object') {
@@ -1000,37 +1260,64 @@
   }
 
   /**
+   * The count cookie, which is the only thing a reader trusts.
+   *
+   * It holds "<generation>:<count>". A plain number is a series written by
+   * 1.3.2 or earlier, which had no generation and so is generation 0.
+   */
+  function parseSeriesCount(countName) {
+    var raw = readCookie(countName) || ''
+    var m = /^(\d+):(\d+)$/.exec(raw)
+    if (m) return { gen: parseInt(m[1], 10), count: parseInt(m[2], 10) }
+    var n = parseInt(raw, 10)
+    return { gen: 0, count: n > 0 ? n : 0 }
+  }
+
+  function chunkName(prefix, gen, i) {
+    return prefix + '_' + (gen ? gen + '_' + i : i)
+  }
+
+  /**
    * Write a base64url payload across the named cookie series. Returns false
    * when it does not fit, so the caller can say so instead of pretending.
+   *
+   * The chunks of a new save go to a fresh generation and the count cookie is
+   * switched to it in one write, so the previous save stays complete and
+   * readable until the new one is. An earlier version published the count as 0
+   * first and then rewrote the chunks in place: killing Freebuff in that window
+   * - which is exactly what one report did - erased the theme, and the next
+   * launch then saved the default over it.
    */
   function writeSeries(prefix, countName, b64, maxChunks) {
     var chunks = []
     for (var p = 0; p < b64.length; p += COOKIE_CHUNK) chunks.push(b64.slice(p, p + COOKIE_CHUNK))
     if (b64.length && chunks.length > maxChunks) return false
-    var prev = parseInt(readCookie(countName) || '0', 10)
-    for (var i = 0; i < prev; i++) eraseCookie(prefix + '_' + i)
-    eraseCookie(prefix)
-    // Publish the count first: a half-written series then reads as absent
-    // rather than as a truncated theme, so a crash mid-save cannot brick the
-    // panel into showing garbage.
-    writeCookie(countName, '0', COOKIE_DAYS)
+    var prev = parseSeriesCount(countName)
+    var gen = prev.gen + 1
     chunks.forEach(function (c, idx) {
-      writeCookie(prefix + '_' + idx, c, COOKIE_DAYS)
+      writeCookie(chunkName(prefix, gen, idx), c, COOKIE_DAYS)
     })
-    writeCookie(countName, String(chunks.length), COOKIE_DAYS)
+    writeCookie(countName, gen + ':' + chunks.length, COOKIE_DAYS)
+    // Only now is the previous generation dead weight.
+    for (var i = 0; i < prev.count; i++) eraseCookie(chunkName(prefix, prev.gen, i))
+    eraseCookie(prefix)
     return true
   }
 
   function readSeries(prefix, countName) {
-    var n = parseInt(readCookie(countName) || '0', 10)
-    if (!(n > 0)) return null
+    var s = parseSeriesCount(countName)
+    if (!(s.count > 0)) return null
     var parts = []
-    for (var i = 0; i < n; i++) {
-      var c = readCookie(prefix + '_' + i)
+    for (var i = 0; i < s.count; i++) {
+      var c = readCookie(chunkName(prefix, s.gen, i))
       if (c === null) return null
       parts.push(c)
     }
     return parts.join('')
+  }
+
+  function seriesPresent(countName) {
+    return readCookie(countName) !== null
   }
 
   function saveToCookies(payload) {
@@ -1041,20 +1328,45 @@
     }
   }
 
-  /** The image gets its own series so a colour tweak never rewrites it. */
-  function saveImageToCookies(dataUrl) {
+  function clearSeries(prefix, countName) {
+    var prev = parseSeriesCount(countName)
+    for (var i = 0; i < prev.count; i++) eraseCookie(chunkName(prefix, prev.gen, i))
+    eraseCookie(prefix)
+    eraseCookie(countName)
+  }
+
+  /** Reads a picture series an older version wrote, for the one-time drain. */
+  function loadBlobFromCookies(prefix, countName) {
     try {
-      if (!dataUrl) {
-        var prev = parseInt(readCookie(IMG_COUNT) || '0', 10)
-        for (var i = 0; i < prev; i++) eraseCookie(IMG_PREFIX + '_' + i)
-        eraseCookie(IMG_PREFIX)
-        eraseCookie(IMG_COUNT)
-        return true
-      }
-      return writeSeries(IMG_PREFIX, IMG_COUNT, toBase64Url(dataUrl), COOKIE_MAX_IMAGE_CHUNKS)
+      var b64 = readSeries(prefix, countName)
+      return b64 ? fromBase64Url(b64) : ''
     } catch (e) {
-      return false
+      return ''
     }
+  }
+
+  /**
+   * Remove a picture series an earlier version wrote. This is not just
+   * tidiness: those cookies are resent with every request, and a series big
+   * enough to push the header block over 16 KB is what leaves the app on a
+   * blank window. Whatever is in them is read once (so an existing picture is
+   * not lost mid-session) and then thrown away.
+   */
+  function drainDeadSeries(s) {
+    var found = []
+    DEAD_SERIES.forEach(function (prefix) {
+      var countName = prefix + '_n'
+      if (!seriesPresent(countName) && !seriesPresent(prefix)) return
+      var value = loadBlobFromCookies(prefix, countName)
+      if (value) found.push({ prefix: prefix, value: value })
+      clearSeries(prefix, countName)
+    })
+    if (!found.length) return s
+    // The background series was the only one that ever shipped, so the first
+    // picture found belongs to the background.
+    if (s.background && !s.background.image) s.background.image = found[0].value
+    if (found[1] && s.logo && !s.logo.image) s.logo.image = found[1].value
+    return s
   }
 
   function loadFromCookies() {
@@ -1080,54 +1392,114 @@
     return null
   }
 
-  function loadImageFromCookies() {
-    try {
-      var b64 = readSeries(IMG_PREFIX, IMG_COUNT)
-      return b64 ? fromBase64Url(b64) : ''
-    } catch (e) {
-      return ''
-    }
-  }
-
-  /** The pre-base64 layout: raw JSON, one character per byte. */
+  /** The pre-base64 layout: raw JSON, one character per byte, same names. */
   function readSeriesRaw(prefix, countName) {
-    var n = parseInt(readCookie(countName) || '0', 10)
-    if (!(n > 0)) {
+    if (!seriesPresent(countName)) {
       var single = readCookie(prefix)
       return single || null
     }
-    var parts = []
-    for (var i = 0; i < n; i++) {
-      var c = readCookie(prefix + '_' + i)
-      if (c === null) return null
-      parts.push(c)
-    }
-    return parts.join('')
+    return readSeries(prefix, countName)
   }
 
-  /** The image lives in its own cookie series; fold it back into the theme. */
-  function withImage(s) {
-    var img = loadImageFromCookies()
-    if (img) s.background.image = img
+  /*
+   * Pictures are session-only.
+   *
+   * A picture is hundreds of kilobytes; a theme is four. There is no cookie
+   * budget for a picture that does not also threaten the app's own requests, so
+   * pictures are kept exactly where they cannot hurt: in localStorage, for this
+   * session, plus inside any .fbtheme file the user exports (and the injector
+   * can bake one into the install with --theme, which is how a picture becomes
+   * permanent). The panel says so where the picture is picked.
+   *
+   * "This session" is precise: localStorage is keyed by address *and port*, and
+   * Freebuff takes a new port on every launch, so a picture survives a reload
+   * and is gone after a restart.
+   */
+  function withSessionPictures(s) {
+    try {
+      return drainDeadSeries(s)
+    } catch (e) {
+      return s
+    }
+  }
+
+  /** The same-session cache, or null. Never throws, never trusts its shape. */
+  function readCachedState() {
+    try {
+      var ls = localStorage.getItem(LS_KEY)
+      if (!ls) return null
+      var parsed = JSON.parse(ls)
+      return parsed && typeof parsed === 'object' ? parsed : null
+    } catch (e) {
+      return null
+    }
+  }
+
+  /**
+   * Fold the session pictures out of the cache into a state that came from
+   * cookies.
+   *
+   * The pictures are only ever in the cache - see withSessionPictures - so
+   * without this a plain reload (Ctrl+R) would drop them even though the app
+   * never restarted. Only pictures are taken from the cache: everything else
+   * comes from the cookies, which are the newer copy of it.
+   */
+  function withCachedPictures(s, cached) {
+    if (!cached) return s
+    if (s.background && !s.background.image && cached.background) {
+      s.background.image = safeCachedPicture(cached.background.image)
+    }
+    if (s.logo && !s.logo.image && cached.logo) {
+      s.logo.image = safeCachedPicture(cached.logo.image)
+    }
     return s
   }
 
+  /** A cached picture is only used if it is really an image and not enormous. */
+  function safeCachedPicture(v) {
+    var url = cleanDataUrl(v)
+    if (!url || dataUrlBytes(url) > PAINT_MAX_BYTES) return ''
+    return url
+  }
+
   function loadState() {
+    var cached = readCachedState()
     var fromCookie = loadFromCookies()
-    if (fromCookie) return withImage(normalizeState(fromCookie))
-    try {
-      var ls = localStorage.getItem(LS_KEY)
-      if (ls) {
-        var parsed = withImage(normalizeState(JSON.parse(ls)))
-        // migrate the same-session cache into cookies for the next launch
-        saveStateNow(parsed)
-        return parsed
-      }
-    } catch (e) {}
+    if (fromCookie) {
+      return settleState(withCachedPictures(withSessionPictures(normalizeState(fromCookie)), cached))
+    }
+    // The count cookie is still there, so a theme was saved and could not be
+    // read back. Say so rather than quietly starting from the default - and
+    // note that nothing is written over it until the user changes something.
+    if (seriesPresent(COOKIE_COUNT)) {
+      notifySave('Your saved theme could not be read - nothing was overwritten')
+    }
+    if (cached) {
+      var parsed = settleState(withSessionPictures(normalizeState(cached)))
+      // migrate the same-session cache into cookies for the next launch
+      saveStateNow(parsed, true)
+      return parsed
+    }
     // A theme baked in at install time by the injector (--theme). It may be a
     // bare theme or the same .fbtheme document users save.
-    if (window.__FREEBUFF_THEME_DEFAULT__) return normalizeState(unwrapTheme(window.__FREEBUFF_THEME_DEFAULT__))
+    if (window.__FREEBUFF_THEME_DEFAULT__) {
+      return settleState(withCachedPictures(normalizeState(unwrapTheme(window.__FREEBUFF_THEME_DEFAULT__)), cached))
+    }
     return clone(DEFAULT_STATE)
+  }
+
+  /** Ready to paint: a picture a previous version stored unbounded is dropped
+   *  rather than handed to the renderer, and whatever is left over is saved
+   *  back so the next launch starts clean. */
+  function settleState(s) {
+    var dropped = dropOversizedImages(s)
+    if (dropped.length) {
+      notifySave('Dropped an oversized ' + dropped.join(' and ') + ' - it was too big to paint')
+      try {
+        saveStateNow(s, true)
+      } catch (e) {}
+    }
+    return s
   }
 
   /*
@@ -1149,24 +1521,90 @@
   var SAVE_AFTER = 400
   var SAVE_AT_MOST = 1500
   var saveNotice = null
+  var queuedNotice = ''
 
-  function saveStateNow(s) {
+  /*
+   * Nothing is written until something has actually been changed.
+   *
+   * This is the other half of "my theme is gone after a restart". If a load
+   * comes up empty - a chunk that never reached disk, a series a hard kill
+   * interrupted - the engine used to boot on the default theme and then save
+   * that default at the first touch of any control, destroying the theme that
+   * was still sitting in the cookies. Now an untouched boot state is never
+   * written, so a theme that failed to load is still there to be recovered.
+   */
+  var stateDirty = false
+  var pictureNoticeShown = false
+
+  /** Say something about a save that could not keep everything. Before the UI
+   *  exists the message waits for it instead of being dropped. */
+  function notifySave(msg) {
+    if (!msg) return
+    if (saveNotice) saveNotice(msg)
+    else queuedNotice = msg
+  }
+
+  /**
+   * What the cookie series holds: the theme, with the pictures left out.
+   *
+   * This is the fix for "my theme and my pictures are gone after a restart".
+   * The payload used to carry the background data URL, so a theme with a
+   * picture in it was megabytes of JSON against a budget of 24 chunks - around
+   * 91 KB. writeSeries() refused it, and refused it *before* touching the old
+   * cookies, so nothing was written at all: not the picture, and not one of the
+   * colours either. One picture meant the whole theme reverted on restart.
+   */
+  function cookiePayload(s) {
+    var copy = clone(s)
+    if (copy.background) copy.background.image = ''
+    if (copy.logo) copy.logo.image = ''
+    return copy
+  }
+
+  function hasPicture(s) {
+    return !!((s.background && s.background.image) || (s.logo && s.logo.image))
+  }
+
+  function saveStateNow(s, force) {
+    if (!stateDirty && !force) return false
     if (saveTimer) {
       clearTimeout(saveTimer)
       saveTimer = null
     }
     saveFirstAt = 0
-    var payload = JSON.stringify(s)
+
+    // localStorage is a same-session cache only - the app takes a fresh port on
+    // every launch, so its origin (and this value) does not survive a restart.
     try {
-      localStorage.setItem(LS_KEY, payload)
-    } catch (e) {}
-    var ok = saveToCookies(payload)
-    saveImageToCookies(s.background ? s.background.image : '')
-    if (!ok && saveNotice) saveNotice('This theme is too big to save')
+      localStorage.setItem(LS_KEY, JSON.stringify(s))
+    } catch (e) {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify(cookiePayload(s)))
+      } catch (e2) {}
+    }
+
+    var ok = saveToCookies(JSON.stringify(cookiePayload(s)))
+    if (!ok) {
+      // One oversized field - the raw CSS box, usually - must not cost the
+      // colours and the layout along with it.
+      var bare = cookiePayload(s)
+      bare.raw = ''
+      ok = saveToCookies(JSON.stringify(bare))
+      if (ok) notifySave('Saved without the custom CSS - it is too long to remember')
+    }
+
+    if (!ok) {
+      notifySave('This theme is too big to remember - Freebuff cannot carry more')
+    } else if (hasPicture(s) && !pictureNoticeShown) {
+      // Once per session: the pictures are the one thing cookies cannot hold.
+      pictureNoticeShown = true
+      notifySave('Picture applied for this session - Export the theme to keep it for good.')
+    }
     return ok
   }
 
   function saveState(s, immediate) {
+    stateDirty = true
     pending = s
     if (immediate) return saveStateNow(s)
     if (saveTimer && Date.now() - saveFirstAt > SAVE_AT_MOST) return saveStateNow(s)
@@ -1232,7 +1670,12 @@
     var preset = state.preset !== 'default' ? PRESET_BY_ID[state.preset] : null
     if (preset && preset.colors) for (var k0 in preset.colors) out[k0] = preset.colors[k0]
     for (var k in state.colors) out[k] = toCss(state.colors[k])
-    for (var k2 in state.layout) out[k2] = state.layout[k2]
+    // Layout values are validated on the way out as well as on the way in: a
+    // theme file is not the only thing that can put a value here.
+    for (var k2 in state.layout) {
+      var lv = sanitizeLayoutValue(k2, state.layout[k2])
+      if (lv !== '') out[k2] = lv
+    }
     // The dials run last so they retune the finished palette, whatever built it.
     if (adjustmentsActive()) for (var k3 in out) out[k3] = adjustColor(out[k3], k3)
     // Gradients go on after the dials: a gradient string is not a colour, and
@@ -1364,18 +1807,41 @@
    * So this layer is a real stylesheet, rewritten whenever the theme changes.
    * ------------------------------------------------------------------ */
 
-  /* Every token the app declares on something other than :root. */
-  var SHELL_OWNED = [
-    '--panel-divider', '--shell-header-divider', '--shell-inset', '--shell-rail-width',
-    '--tabbar-height', '--workspace-corner', '--workspace-edge', '--workspace-shadow',
-    '--sidebar-canvas', '--sidebar-edge', '--terminal-background', '--tab-new-space',
-    '--explorer-reserve', '--rail-reserve', '--native-controls-width',
-    // Radii the settings page and modals declare for themselves.
-    '--settings-card-radius', '--settings-control-radius', '--settings-popup-radius',
-    '--settings-corner', '--clip-radius',
-  ]
-  var SHELL_SELECTOR =
+  /*
+   * Every token the app declares on something other than :root, and where.
+   *
+   * This used to be one flat list written to one big selector list, which
+   * meant every token was forced onto every shell element. A theme made by an
+   * older version could then clobber a token the app *computes* per node - the
+   * explorer and rail reserves, the native-controls width - and the sidebars,
+   * rails and panels would draw over each other. Each token is now
+   * re-declared only where the app itself declares it, and the computed ones
+   * are left to the app.
+   */
+  var SHELL_RADII =
     ':root, .desktop-shell, .app-workspace, .app, .project-sidebar, .terminal-panel, .settings-page, .modal'
+  var SHELL_TARGETS = {
+    // Radii and insets are declared on the element that uses them, so the
+    // whole shell has to be covered for one to take effect.
+    '--workspace-corner': SHELL_RADII,
+    '--shell-inset': SHELL_RADII,
+    '--tabbar-height': SHELL_RADII,
+    '--settings-card-radius': SHELL_RADII,
+    '--settings-control-radius': SHELL_RADII,
+    '--settings-popup-radius': SHELL_RADII,
+    '--settings-corner': SHELL_RADII,
+    '--clip-radius': SHELL_RADII,
+    // The rest already belong to the element that paints them.
+    '--sidebar-canvas': '.desktop-shell, .project-sidebar',
+    '--sidebar-edge': '.desktop-shell, .project-sidebar',
+    '--terminal-background': '.desktop-shell, .terminal-panel',
+    '--shell-rail-width': '.desktop-shell, .app-workspace, .app',
+    '--tab-new-space': '.desktop-shell, .app-workspace, .app',
+    '--workspace-edge': '.app-workspace, .app',
+    '--workspace-shadow': '.app-workspace, .app',
+    '--panel-divider': '.desktop-shell, .app-workspace, .app, .project-sidebar, .terminal-panel',
+    '--shell-header-divider': '.desktop-shell, .project-sidebar',
+  }
 
   var LOGO_IMG_SELECTOR = '.new-thread-logo, .splash-logo, .loading-screen-logo, .empty-space-logo'
   // An inline SVG has no image to swap: paint a background behind it and hide
@@ -1397,38 +1863,50 @@
     var lines = []
     var k
 
-    var shell = []
-    for (k in values) if (SHELL_OWNED.indexOf(k) >= 0) shell.push(k)
-    if (shell.length) {
-      lines.push(SHELL_SELECTOR + ' {')
-      shell.forEach(function (name) {
-        lines.push('  ' + name + ': ' + values[name] + ' !important;')
+    var byTarget = {}
+    for (k in values) {
+      var target = SHELL_TARGETS[k]
+      var value = safeCss(values[k])
+      if (!target || !value) continue
+      if (!byTarget[target]) byTarget[target] = []
+      byTarget[target].push(k + ': ' + value + ' !important;')
+    }
+    for (var sel in byTarget) {
+      lines.push(sel + ' {')
+      byTarget[sel].forEach(function (decl) {
+        lines.push('  ' + decl)
       })
       lines.push('}')
     }
 
     // A gradient dropped into a token that something also reads as a colour.
     for (var gt in GRADIENT_FALLBACK) {
-      if (values[gt] && solidCache[gt]) {
-        lines.push(GRADIENT_FALLBACK[gt] + ' { color: ' + solidCache[gt] + ' !important; }')
+      var solid = safeCss(solidCache[gt])
+      if (values[gt] && solid) {
+        lines.push(GRADIENT_FALLBACK[gt] + ' { color: ' + solid + ' !important; }')
       }
     }
 
     var w = state.window || {}
-    if (w.ink) lines.push('.window-control { color: ' + w.ink + ' !important; }')
-    if (w.hoverBg || w.hoverInk) {
+    var ink = safeCss(w.ink)
+    var hoverBg = safeCss(w.hoverBg)
+    var hoverInk = safeCss(w.hoverInk)
+    var closeBg = safeCss(w.closeBg)
+    var closeInk = safeCss(w.closeInk)
+    if (ink) lines.push('.window-control { color: ' + ink + ' !important; }')
+    if (hoverBg || hoverInk) {
       lines.push(
         '.window-control:hover { ' +
-          (w.hoverBg ? 'background: ' + w.hoverBg + ' !important; ' : '') +
-          (w.hoverInk ? 'color: ' + w.hoverInk + ' !important; ' : '') +
-          '}'.trim(),
+          (hoverBg ? 'background: ' + hoverBg + ' !important; ' : '') +
+          (hoverInk ? 'color: ' + hoverInk + ' !important; ' : '') +
+          '}',
       )
     }
-    if (w.closeBg || w.closeInk) {
+    if (closeBg || closeInk) {
       lines.push(
         '.window-control-close:hover { ' +
-          (w.closeBg ? 'background: ' + w.closeBg + ' !important; ' : '') +
-          (w.closeInk ? 'color: ' + w.closeInk + ' !important; ' : '') +
+          (closeBg ? 'background: ' + closeBg + ' !important; ' : '') +
+          (closeInk ? 'color: ' + closeInk + ' !important; ' : '') +
           '}',
       )
     }
@@ -1438,7 +1916,7 @@
       var src = cssEscapeUrl(logo.image)
       var scale = logo.size && logo.size !== 1 ? ' scale(' + logo.size + ') !important;' : ''
       var dim = logo.opacity != null && logo.opacity < 1 ? ' opacity: ' + logo.opacity + ' !important;' : ''
-      var filt = ' filter: ' + (logo.filter || 'none') + ' !important;'
+      var filt = ' filter: ' + (sanitizeFilter(logo.filter) || 'none') + ' !important;'
       lines.push(LOGO_IMG_SELECTOR + ' { content: ' + src + ' !important; object-fit: contain !important;' + scale + dim + filt + ' transform-origin: center !important; }')
       lines.push(LOGO_BOX_SELECTOR + ' { background-image: ' + src + ' !important; background-size: contain !important; background-repeat: no-repeat !important; background-position: center !important;' + filt + ' }')
       lines.push(LOGO_BOX_SELECTOR + ' > * { visibility: hidden !important; }')
@@ -1510,8 +1988,27 @@
     return lines.join('\n')
   }
 
-  // Apply before the UI mounts so there is no flash of the default theme.
-  applyState()
+  /*
+   * Apply before the UI mounts so there is no flash of the default theme.
+   *
+   * Wrapped, because this runs against whatever the stored theme happens to
+   * be. A theme that throws must not leave the host page half-painted or stop
+   * the rest of this file from mounting the panel: the defaults are applied
+   * instead, and the stored theme is left untouched so the user can reopen
+   * Theme Studio and fix it.
+   */
+  try {
+    applyState()
+  } catch (err) {
+    console.error('[freebuff-theme-studio] could not apply the saved theme', err)
+    try {
+      state = clone(DEFAULT_STATE)
+      applyState()
+    } catch (err2) {
+      console.error('[freebuff-theme-studio] could not apply the default theme either', err2)
+    }
+    notifySave('Your saved theme could not be applied - the default is showing')
+  }
 
   /* ------------------------------------------------------------------ *
    * UI
@@ -2151,7 +2648,14 @@
       clearTimeout(toastTimer)
       toastTimer = setTimeout(function () {
         toast.classList.remove('show')
-      }, 1900)
+      }, 3200)
+    }
+
+    // Saving can happen before the panel exists (a theme is migrated, or a
+    // picture turns out to be too big). Those messages waited in queuedNotice
+    // and are shown once the panel is on screen.
+    saveNotice = function (msg) {
+      showToast(msg)
     }
 
     /* ---- update chip + popup ---- */
@@ -3330,8 +3834,9 @@
      *
      * Both are pictures, so both are stored as data URLs and travel inside the
      * theme: a .fbtheme file with a background in it needs no hosting and no
-     * extra files. The price is size, and the panel says so rather than
-     * silently dropping the picture when it gets too big.
+     * extra files. The price is size, so both are scaled to fit a budget on the
+     * way in and kept in cookie series of their own - a picture can then only
+     * ever cost the picture, never the colours.
      */
 
     // Filled in by the two panes below, and called by rebuild() after a theme
@@ -3339,19 +3844,56 @@
     // round.
     var pageRefresh = null
 
-    function readAsDataUrl(file, cb) {
+    /*
+     * Picking a picture. A small file is passed through untouched; anything
+     * over the budget for its slot is scaled down and re-encoded first, so
+     * what reaches the state is always something the theme can remember.
+     */
+    function readImageFile(file, kind, cb) {
       if (!file) return
-      if (file.size > 2.2 * 1024 * 1024) {
-        showToast('That picture is over 2 MB - please resize it first')
+      if (file.size > 24 * 1024 * 1024) {
+        showToast('That picture is over 24 MB - please resize it first')
         return
       }
-      var reader = new FileReader()
-      reader.onload = function () { cb(String(reader.result == null ? '' : reader.result)) }
-      reader.onerror = function () { showToast('Could not read that file') }
-      reader.readAsDataURL(file)
+      // SVG is text, stays sharp at any size, and is usually tiny.
+      if (/^image\/svg\+xml/i.test(file.type)) {
+        var reader = new FileReader()
+        reader.onload = function () { cb(cleanDataUrl(String(reader.result == null ? '' : reader.result))) }
+        reader.onerror = function () { showToast('Could not read that file') }
+        reader.readAsDataURL(file)
+        return
+      }
+      var limit = IMAGE_KINDS[kind] || IMAGE_KINDS.background
+      if (file.size <= limit.maxBytes) {
+        var small = new FileReader()
+        small.onload = function () { cb(cleanDataUrl(String(small.result == null ? '' : small.result))) }
+        small.onerror = function () { showToast('Could not read that file') }
+        small.readAsDataURL(file)
+        return
+      }
+      var url = null
+      try {
+        url = URL.createObjectURL(file)
+      } catch (e) {
+        showToast('Could not read that file')
+        return
+      }
+      fitImage(url, kind, function (fitted) {
+        try {
+          URL.revokeObjectURL(url)
+        } catch (e) {}
+        if (!fitted) {
+          showToast('Could not read that picture')
+          return
+        }
+        if (dataUrlBytes(fitted) > limit.maxBytes) {
+          showToast('That picture is heavy - it may not survive a restart')
+        }
+        cb(fitted)
+      })
     }
 
-    function imagePicker(label, onPick) {
+    function imagePicker(label, kind, onPick) {
       var input = el('input', {
         type: 'file', style: 'display:none',
         accept: 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml',
@@ -3359,7 +3901,7 @@
       input.addEventListener('change', function () {
         var f = input.files && input.files[0]
         input.value = ''
-        readAsDataUrl(f, onPick)
+        readImageFile(f, kind, onPick)
       })
       var btn = el('button', { class: 'fbts-btn', type: 'button', text: label, onclick: function () { input.click() } })
       return { input: input, btn: btn }
@@ -3417,7 +3959,7 @@
 
     /* ---- the logo ---- */
     var logoPreview = previewBox(function () { return state.logo.image }, 'No picture - Freebuff draws its own mark.')
-    var logoPick = imagePicker('Choose a picture', function (raw) {
+    var logoPick = imagePicker('Choose a picture', 'logo', function (raw) {
       var url = cleanDataUrl(raw)
       if (!url) {
         showToast('That file is not an image')
@@ -3473,7 +4015,7 @@
         ]),
         el('div', {
           class: 'fbts-note',
-          text: 'SVG, PNG, JPG, GIF or WebP. It replaces the mark on the new-thread screen, the loading screen, the splash and the project sidebar wordmark. Size and opacity only affect the watermark, which Freebuff draws very faint on purpose.',
+          text: 'SVG, PNG, JPG, GIF or WebP. It replaces the mark on the new-thread screen, the loading screen, the splash and the project sidebar wordmark. Size and opacity only affect the watermark, which Freebuff draws very faint on purpose. Like the background picture, a logo is kept for this session only - Export the theme to keep it.',
         }),
       ], { actions: [headLink('Reset', 'Back to Freebuff\u2019s own mark', function () {
         state.logo = clone(DEFAULT_LOGO)
@@ -3484,7 +4026,7 @@
 
     /* ---- the background picture ---- */
     var bgPreview = previewBox(function () { return state.background.image }, 'No picture - the theme\u2019s own colour is used.')
-    var bgPick = imagePicker('Choose a picture', function (raw) {
+    var bgPick = imagePicker('Choose a picture', 'background', function (raw) {
       var url = cleanDataUrl(raw)
       if (!url) {
         showToast('That file is not an image')
@@ -3550,7 +4092,7 @@
         el('div', { class: 'fbts-col', style: 'margin-top:9px' }, [bgFit.node, bgPos.node, bgOpacity.node, bgDim.node]),
         el('div', {
           class: 'fbts-note',
-          text: 'The picture is saved inside the theme, so it travels with a .fbtheme file and needs no hosting. That also means a big picture makes a big theme file: under about 200 KB keeps saving quick, and under 2 MB always works. Dim adds a dark veil; opacity lets the theme colour show through.',
+          text: 'The picture is saved inside the theme, so it travels with a .fbtheme file and needs no hosting. Big pictures are scaled down to fit what a theme can remember (about 150 KB, up to 2560 px on the long side), so nothing huge reaches the page. Freebuff\u2019s own storage cannot hold a picture between launches without breaking its own requests, so a picture lasts for this session: Export the theme to keep it, or bake it into the install with the injector. Dim adds a dark veil; opacity lets the theme colour show through.',
         }),
       ], { actions: [headLink('Reset', 'Remove the background picture', function () {
         state.background = clone(DEFAULT_BACKGROUND)
@@ -3698,10 +4240,12 @@
 
     function applyThemeObject(next, label) {
       state = normalizeState(next)
-      applyState()
-      saveState(state, true)
-      rebuild()
-      showToast('Applied "' + label + '"')
+      shrinkThemeImages(state, function () {
+        applyState()
+        saveState(state, true)
+        rebuild()
+        showToast('Applied "' + label + '"')
+      })
     }
 
     var community = communityThemes()
@@ -4055,11 +4599,16 @@
         return
       }
       state = parsed
-      applyState()
-      saveState(state, true)
-      rebuild()
       importArea.value = ''
-      showToast('Opened "' + (state.name || 'theme') + '"')
+      // A theme made by an older version can carry a picture far bigger than
+      // the store will hold. Bring it down to size before anything is saved,
+      // so opening an old theme cannot leave the app unable to remember it.
+      shrinkThemeImages(state, function () {
+        applyState()
+        saveState(state, true)
+        rebuild()
+        showToast('Opened "' + (state.name || 'theme') + '"')
+      })
     }
 
     function readThemeFile(file) {
@@ -4207,6 +4756,11 @@
     refreshSpots()
     refreshKnobs()
     refreshActive()
+
+    if (queuedNotice) {
+      showToast(queuedNotice)
+      queuedNotice = ''
+    }
 
     // One quiet check per session, well clear of the app's own startup work,
     // then a poll so a session left open still hears about a release. The
