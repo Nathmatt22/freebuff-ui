@@ -42,7 +42,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.3.0"
+	version       = "1.3.1"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"

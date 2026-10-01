@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.3.0'
+  var VERSION = '1.3.1'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -3630,7 +3630,12 @@
     }
 
     community.forEach(function (entry) {
-      var card = el('div', { class: 'fbts-preset', title: 'Apply ' + entry.name })
+      // The author's own description rides along in the tooltip rather than in a
+      // box of its own, which took up a third of the tab to say very little.
+      var tip = 'Apply ' + entry.name
+      if (entry.note) tip += '\n' + entry.note
+      if (entry.author) tip += '\nby ' + entry.author
+      var card = el('div', { class: 'fbts-preset', title: tip })
       var thumb = el('div', { class: 'fbts-thumb', style: thumbStyle({ colors: previewColors(entry.theme) }) }, thumbParts())
       card.appendChild(thumb)
       card.appendChild(el('div', { class: 'fbts-preset-name', text: entry.name }))
@@ -3662,18 +3667,6 @@
           : [],
       }),
     )
-
-    if (community.length) {
-      var first = community[0]
-      if (first.note) {
-        communityPane.appendChild(
-          group('About ' + first.name, [
-            el('div', { class: 'fbts-community-note', text: first.note }),
-            el('div', { class: 'fbts-note', text: 'Submitted by ' + (first.author || 'an anonymous contributor') + '.' }),
-          ]),
-        )
-      }
-    }
 
     /* ---- submit one ---- */
     function submitUrl() {

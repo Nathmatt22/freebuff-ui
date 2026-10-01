@@ -162,8 +162,9 @@ Changes appear as you make them. There is no save button.
 ### Community
 
 Themes made by other people, shipped inside the extension. Each one is drawn as a
-miniature in its own colours; click it to apply it. Because a community theme replaces
-whatever you are editing, save yours first if you want to keep it.
+miniature in its own colours, with who made it underneath and a line about it on hover;
+click it to apply it. Because a community theme replaces whatever you are editing, save
+yours first if you want to keep it.
 
 **Submit your own** is the same tab, further down: set the theme name, press **Save
 .fbtheme**, then press **Open the submission page**. That opens a GitHub form in your

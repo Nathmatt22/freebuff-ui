@@ -23,7 +23,7 @@ window.__FREEBUFF_THEME_COMMUNITY__ = {
     {
       id: 'wintage-golden-default',
       name: 'Wintage — Golden Default',
-      author: 'FuneralPixels',
+      author: 'vacuum34',
       note: 'Warm gold on charcoal, every corner squared off, and a typewriter face for the code.',
       theme: {
         "v": 1,
