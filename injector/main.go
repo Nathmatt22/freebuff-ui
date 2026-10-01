@@ -38,7 +38,7 @@ import (
 var engineJS []byte
 
 const (
-	version      = "1.1.0"
+	version      = "1.1.1"
 	markerStart  = "<!-- freebuff-theme-studio:start -->"
 	markerEnd    = "<!-- freebuff-theme-studio:end -->"
 	engineName   = "freebuff-theme-studio.js"
@@ -330,9 +330,19 @@ func bakeTheme(ui, themeFile string) error {
 	if err != nil {
 		return err
 	}
-	var probe any
+	var probe map[string]any
 	if err := json.Unmarshal(b, &probe); err != nil {
 		return fmt.Errorf("theme file is not valid JSON: %w", err)
+	}
+	// A .fbtheme document wraps the theme; bake the theme itself.
+	if inner, ok := probe["theme"].(map[string]any); ok {
+		_, hasColors := probe["colors"]
+		_, hasLayout := probe["layout"]
+		if !hasColors && !hasLayout {
+			if wrapped, err := json.Marshal(inner); err == nil {
+				b = wrapped
+			}
+		}
 	}
 	body := "/* baked by FreebuffThemeInjector --theme */\nwindow.__FREEBUFF_THEME_DEFAULT__ = " + string(b) + ";\n"
 	return os.WriteFile(filepath.Join(assetsDir(ui), defaultName), []byte(body), 0o644)
@@ -434,7 +444,7 @@ func main() {
 		pathFlag      = flag.String("path", "", "Freebuff install directory (auto-detected by default)")
 		uninstallFlag = flag.Bool("uninstall", false, "remove the injected UI and restore the original index.html")
 		statusFlag    = flag.Bool("status", false, "show whether Theme Studio is installed")
-		themeFlag     = flag.String("theme", "", "path to a .json theme to bake in as the default")
+		themeFlag     = flag.String("theme", "", "path to a .fbtheme or .json theme to bake in as the default")
 		restartFlag   = flag.Bool("restart", false, "relaunch Freebuff after installing")
 		openFlag      = flag.Bool("open", false, "open the UI folder in Explorer")
 		quietFlag     = flag.Bool("quiet", false, "less output")

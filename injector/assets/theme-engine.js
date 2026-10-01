@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.1.0'
+  var VERSION = '1.1.1'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -602,6 +602,94 @@
     return s
   }
 
+  /* ------------------------------------------------------------------ *
+   * Sharing
+   *
+   * Two ways out, because neither alone is convenient: a .fbtheme file for
+   * keeping or sending as an attachment, and a one-line share code that can
+   * be pasted into a chat that would mangle multi-line JSON. Both are read
+   * back by the same parser, which also still accepts the bare theme objects
+   * that older versions wrote out.
+   * ------------------------------------------------------------------ */
+
+  var SHARE_PREFIX = 'FBT1.'
+  var THEME_FORMAT = 'fbtheme'
+
+  function toBase64Url(str) {
+    var bytes = new TextEncoder().encode(str)
+    var bin = ''
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+    return btoa(bin)
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '')
+  }
+
+  function fromBase64Url(s) {
+    var b = String(s).replace(/-/g, '+').replace(/_/g, '/')
+    while (b.length % 4) b += '='
+    var bin = atob(b)
+    var bytes = new Uint8Array(bin.length)
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return new TextDecoder().decode(bytes)
+  }
+
+  /** The body of a .fbtheme file: a small envelope around the theme. */
+  function themeDocument(s) {
+    return {
+      format: THEME_FORMAT,
+      formatVersion: 1,
+      app: 'Freebuff Theme Studio v' + VERSION,
+      created: new Date().toISOString(),
+      theme: s,
+    }
+  }
+
+  /** A .fbtheme document carries the theme itself under `theme`. */
+  function unwrapTheme(obj) {
+    if (obj && typeof obj === 'object' && obj.theme && typeof obj.theme === 'object' && !obj.colors && !obj.layout) {
+      return obj.theme
+    }
+    return obj
+  }
+
+  /**
+   * Reads a theme out of anything a user might paste or open: a share code, a
+   * .fbtheme document, or a bare theme object.
+   */
+  function parseThemeText(text) {
+    var raw = String(text == null ? '' : text).trim()
+    if (!raw) throw new Error('nothing to read')
+    if (raw.indexOf(SHARE_PREFIX) === 0) {
+      raw = fromBase64Url(raw.slice(SHARE_PREFIX.length).replace(/\s+/g, ''))
+    }
+    var obj = unwrapTheme(JSON.parse(raw))
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('not a theme')
+    return normalizeState(obj)
+  }
+
+  /** Short one-line code. A preset-only theme comes out tiny. */
+  function shareCode(s) {
+    var out = {
+      v: 1,
+      name: s.name || 'Custom',
+      preset: s.preset || 'default',
+      colors: s.colors || {},
+      layout: s.layout || {},
+    }
+    if (s.raw) out.raw = s.raw
+    if (s.scheme) out.scheme = s.scheme
+    return SHARE_PREFIX + toBase64Url(JSON.stringify(out))
+  }
+
+  function themeFileName(name) {
+    var slug = String(name || 'theme')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+    return (slug || 'theme') + '.' + THEME_FORMAT
+  }
+
   function readCookie(name) {
     var m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'))
     return m ? decodeURIComponent(m[1]) : null
@@ -665,8 +753,9 @@
         return parsed
       }
     } catch (e) {}
-    // A theme baked in at install time by the injector (--theme).
-    if (window.__FREEBUFF_THEME_DEFAULT__) return normalizeState(window.__FREEBUFF_THEME_DEFAULT__)
+    // A theme baked in at install time by the injector (--theme). It may be a
+    // bare theme or the same .fbtheme document users save.
+    if (window.__FREEBUFF_THEME_DEFAULT__) return normalizeState(unwrapTheme(window.__FREEBUFF_THEME_DEFAULT__))
     return clone(DEFAULT_STATE)
   }
 
@@ -1033,6 +1122,9 @@
 .fbts-note { font-size: 10.5px; color: var(--fbts-faint); line-height: 1.5; margin: 6px 2px 0; }
 .fbts-textarea { width: 100%; min-height: 150px; background: #0e0f13; border: 1px solid var(--fbts-line); border-radius: 9px; color: var(--fbts-ink); font-family: var(--fbts-mono); font-size: 11px; line-height: 1.5; padding: 9px; resize: vertical; outline: none; }
 .fbts-textarea:focus { border-color: var(--fbts-accent); }
+.fbts-textarea.drop { border-color: var(--fbts-accent); background: color-mix(in srgb, var(--fbts-accent) 12%, #0e0f13); }
+.fbts-code-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.fbts-code-row input { flex: 1; min-width: 0; margin: 0; font-family: var(--fbts-mono); font-size: 11px; }
 .fbts-search { width: 100%; background: var(--fbts-panel2); border: 1px solid var(--fbts-line); border-radius: 8px; color: var(--fbts-ink); padding: 7px 9px; font-size: 11.5px; outline: none; margin-bottom: 8px; }
 .fbts-search:focus { border-color: var(--fbts-accent); }
 .fbts-toast {
@@ -1740,46 +1832,88 @@
     nameInput.addEventListener('input', function () {
       state.name = nameInput.value
       saveState(state)
+      // The name travels with the theme, so the generated boxes must follow it.
+      refreshActive()
     })
     ioPane.appendChild(el('div', { class: 'fbts-section-title', text: 'Theme name' }))
     ioPane.appendChild(nameInput)
 
+    function copyText(text, okMessage) {
+      if (!navigator.clipboard) {
+        showToast('Clipboard unavailable')
+        return
+      }
+      navigator.clipboard.writeText(text).then(function () { showToast(okMessage) }).catch(function () { showToast('Copy failed') })
+    }
+
+    /* "This theme": generated output, kept in step with the live theme. */
     var exportArea = el('textarea', { class: 'fbts-textarea', spellcheck: 'false', readonly: 'readonly' })
-    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:14px', text: 'Theme JSON' }))
+    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:14px', text: 'This theme' }))
     ioPane.appendChild(exportArea)
-    ioPane.appendChild(el('div', { class: 'fbts-note', text: 'Paste a theme here and press Import to load it.' }))
-    ioPane.appendChild(el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:10px 0 0' }, [
+    ioPane.appendChild(el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:8px 0 0' }, [
       el('button', {
-        class: 'fbts-btn primary', text: 'Import',
+        class: 'fbts-btn primary', text: 'Save .fbtheme',
         onclick: function () {
-          try {
-            var parsed = normalizeState(JSON.parse(exportArea.value))
-            state = parsed
-            applyState()
-            saveState(state, true)
-            rebuild()
-            showToast('Theme imported')
-          } catch (e) {
-            showToast('Invalid JSON')
-          }
+          download(JSON.stringify(themeDocument(state), null, 2), themeFileName(state.name))
+          showToast('Saved ' + themeFileName(state.name))
         },
       }),
       el('button', {
-        class: 'fbts-btn', text: 'Download .json',
-        onclick: function () {
-          download(JSON.stringify(state, null, 2), (state.name || 'theme') + '.freebuff-theme.json')
-          showToast('Downloaded')
-        },
+        class: 'fbts-btn', text: 'Copy theme',
+        onclick: function () { copyText(exportArea.value, 'Theme JSON copied') },
       }),
       el('button', {
         class: 'fbts-btn', text: 'Copy CSS',
-        onclick: function () {
-          var css = cssText()
-          if (navigator.clipboard) navigator.clipboard.writeText(css).then(function () { showToast('CSS copied') }).catch(function () { showToast('Copy failed') })
-          else showToast('Clipboard unavailable')
-        },
+        onclick: function () { copyText(cssText(), 'CSS copied') },
       }),
     ]))
+
+    var shareInput = el('input', {
+      class: 'fbts-search',
+      type: 'text',
+      readonly: 'readonly',
+      style: 'font-family:var(--fbts-mono);font-size:11px',
+      title: 'One line that carries the whole theme',
+    })
+    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:16px', text: 'Share code' }))
+    ioPane.appendChild(el('div', { class: 'fbts-code-row' }, [
+      shareInput,
+      el('button', {
+        class: 'fbts-btn', text: 'Copy',
+        onclick: function () { copyText(shareInput.value, 'Share code copied') },
+      }),
+    ]))
+    ioPane.appendChild(el('div', { class: 'fbts-note', text: 'One line, so it survives being pasted into a chat or an issue.' }))
+
+    /* "Paste a theme": the editable box. Nothing overwrites this one. */
+    var importArea = el('textarea', {
+      class: 'fbts-textarea',
+      spellcheck: 'false',
+      style: 'min-height:104px',
+      placeholder: 'Paste a share code, or the contents of a .fbtheme file.',
+    })
+    ioPane.appendChild(el('div', { class: 'fbts-section-title', style: 'margin-top:18px', text: 'Open a theme' }))
+    ioPane.appendChild(importArea)
+
+    var fileInput = el('input', { type: 'file', accept: '.fbtheme,.json,application/json', style: 'display:none' })
+    fileInput.addEventListener('change', function () {
+      var file = fileInput.files && fileInput.files[0]
+      fileInput.value = ''
+      if (file) readThemeFile(file)
+    })
+    ioPane.appendChild(fileInput)
+
+    ioPane.appendChild(el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:8px 0 0' }, [
+      el('button', {
+        class: 'fbts-btn primary', text: 'Import',
+        onclick: function () { importThemeFromText(importArea.value) },
+      }),
+      el('button', {
+        class: 'fbts-btn', text: 'Choose a file',
+        onclick: function () { fileInput.click() },
+      }),
+    ]))
+    ioPane.appendChild(el('div', { class: 'fbts-note', text: 'You can also drop a .fbtheme file anywhere on this page.' }))
 
     /* ---- footer ---- */
     var footer = el('div', { class: 'fbts-actions' }, [
@@ -1828,6 +1962,57 @@
       true,
     )
 
+    /* ---- opening a theme ---- */
+    function importThemeFromText(text) {
+      var parsed
+      try {
+        parsed = parseThemeText(text)
+      } catch (e) {
+        showToast('That is not a theme')
+        return
+      }
+      state = parsed
+      applyState()
+      saveState(state, true)
+      rebuild()
+      importArea.value = ''
+      showToast('Opened "' + (state.name || 'theme') + '"')
+    }
+
+    function readThemeFile(file) {
+      var reader = new FileReader()
+      reader.onload = function () {
+        importThemeFromText(String(reader.result == null ? '' : reader.result))
+      }
+      reader.onerror = function () { showToast('Could not read that file') }
+      reader.readAsText(file)
+    }
+
+    /* Dropping a .fbtheme file on the page opens it. */
+    panel.addEventListener('dragover', function (e) {
+      if (!e.dataTransfer) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+      importArea.classList.add('drop')
+    })
+    panel.addEventListener('dragleave', function (e) {
+      if (e.target === panel || !panel.contains(e.relatedTarget)) importArea.classList.remove('drop')
+    })
+    panel.addEventListener('drop', function (e) {
+      e.preventDefault()
+      importArea.classList.remove('drop')
+      var dt = e.dataTransfer
+      if (!dt) return
+      var file = dt.files && dt.files[0]
+      if (file && file.size) {
+        readThemeFile(file)
+        return
+      }
+      var text = dt.getData('text/plain') || dt.getData('text')
+      if (text) importThemeFromText(text)
+      else showToast('Nothing to open')
+    })
+
     /* ---- refresh helpers ---- */
     function presetSwatches(p) {
       if (!p.colors) return ['#0a0a0a', '#1c1c1c', '#b5cea5', '#ebebeb']
@@ -1847,8 +2032,9 @@
         var active = mode === 'auto' ? !state.scheme : state.scheme === mode
         btn.style.borderColor = active ? 'var(--fbts-accent)' : ''
       })
-      // export area
-      exportArea.value = JSON.stringify(state, null, 2)
+      // The generated boxes only; the import box belongs to whoever is typing.
+      exportArea.value = JSON.stringify(themeDocument(state), null, 2)
+      shareInput.value = shareCode(state)
       schemeLabel.textContent = 'v' + VERSION + '  \u00b7  ' + (state.preset === 'default' ? 'custom' : state.preset)
     }
 

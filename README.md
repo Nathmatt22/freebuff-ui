@@ -28,7 +28,9 @@ You do not need to know how to code to use it.
 - **Full colour control**: change any of the 212 colours Freebuff uses, one by one.
 - **Layout control**: corner roundness, text size, fonts, and panel sizes.
 - **A raw CSS box** for anything the controls do not cover.
-- **Import and export** so you can save a theme to a file or share it with someone.
+- **A custom `.fbtheme` file** you can save, send to someone and open again, plus a
+  one-line share code for pasting into a chat.
+- **Drag and drop**: drop a `.fbtheme` file on the page and it opens.
 
 Your theme is remembered after you close and reopen Freebuff.
 
@@ -104,11 +106,28 @@ Two things live here:
 
 ### Export
 
-Give your theme a name, then use the buttons to save it or load one:
+Give your theme a name, then use the three groups of controls on this page.
 
-- **Import** reads whatever text is in the box as a theme.
-- **Download .json** saves your theme as a file you can keep or send to someone.
-- **Copy CSS** copies the theme as plain CSS.
+**This theme** is what you are looking at right now, written out. It keeps up with your
+changes as you make them, and it is read-only - it is output, not input.
+
+- **Save .fbtheme** writes a `.fbtheme` file. That is the file to send to someone.
+- **Copy theme** puts the same text on your clipboard.
+- **Copy CSS** puts the theme on your clipboard as plain CSS, for a stylesheet.
+
+**Share code** is the same theme squeezed onto one line. It is the easiest thing to paste
+into Discord, a chat, or a GitHub issue, because nothing can mangle it. Press **Copy** to
+take it.
+
+**Open a theme** is the box you type or paste into. It is yours: nothing the page does
+ever overwrites it.
+
+- **Import** reads whatever is in that box: a share code, the contents of a `.fbtheme`
+  file, or an older saved theme. All three work.
+- **Choose a file** opens a file picker so you can pick a `.fbtheme` file directly.
+
+You can also drag a `.fbtheme` file from your desktop and drop it anywhere on the Theme
+Studio page. The page highlights the box and opens the theme.
 
 ### The bottom bar
 
@@ -160,8 +179,28 @@ A theme file is a small text file like this:
 }
 ```
 
-To use someone else's theme, open the **Export** section, paste the text into the box,
-and press **Import**.
+A `.fbtheme` file is that theme inside a small wrapper, so the file can say what it is:
+
+```json
+{
+  "format": "fbtheme",
+  "formatVersion": 1,
+  "app": "Freebuff Theme Studio v1.1.1",
+  "created": "2026-10-01T12:00:00.000Z",
+  "theme": { "v": 1, "name": "Midnight Blue", "preset": "midnight", "colors": {}, "layout": {} }
+}
+```
+
+Three ways to give a theme to someone, easiest first:
+
+1. Press **Copy** next to **Share code** and paste the line into a chat. That is the whole
+   theme, one line, and it is what most people will want.
+2. Press **Save .fbtheme** and send the file. Good for a file host, a repository, or an
+   attachment that has to survive a few hops.
+3. Paste the JSON from **This theme** wherever long text is welcome.
+
+To use someone else's theme, put it in the **Open a theme** box and press **Import**, or
+click **Choose a file** and pick a `.fbtheme` file, or drop the file on the page.
 
 ---
 
