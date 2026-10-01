@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.3.1'
+  var VERSION = '1.3.2'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -1245,6 +1245,58 @@
     return out
   }
 
+  /**
+   * The opaque version of a colour value, so a translucent theme colour can be
+   * painted over it instead of vanishing. Accepts a hex, an rgb()/rgba() string
+   * or a gradient, and gives back a bare hex - or '' if there is nothing to use.
+   */
+  function opaqueHex(value) {
+    var s = typeof value === 'string' ? value.trim() : ''
+    if (!s) return ''
+    var direct = parseColor(s)
+    if (direct) return direct.hex
+    // A gradient, or a colour-mix: take the first colour in it.
+    var hexMatch = /#[0-9a-fA-F]{3,8}/.exec(s)
+    if (hexMatch) {
+      var parsedHex = parseColor(hexMatch[0])
+      if (parsedHex) return parsedHex.hex
+    }
+    var rgbMatch = /rgba?\(([^)]+)\)/.exec(s)
+    if (rgbMatch) {
+      var parts = rgbMatch[1].split(/[\s,/]+/).filter(Boolean).slice(0, 3)
+      if (parts.length === 3) return rgbToHex(parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2]))
+    }
+    return ''
+  }
+
+  /** The opaque floor for a token: what the theme colour looks like at full strength. */
+  function floorFor(token, values) {
+    var v = values[token]
+    if (typeof v === 'string') {
+      var h = opaqueHex(v)
+      if (h) return h
+    }
+    var resolved = resolveTokenColor(token)
+    return resolved ? resolved.hex : ''
+  }
+
+  /**
+   * The same token as a background-image layer: a real gradient goes through
+   * untouched, and a plain colour is wrapped so it can be painted as a layer.
+   * That wrapper is also what makes a translucent colour work - it composites
+   * over the floor instead of replacing it.
+   */
+  function layerFor(token, values) {
+    var v = values[token]
+    if (typeof v === 'string' && v) {
+      return /gradient\(/i.test(v) ? v : 'linear-gradient(' + v + ', ' + v + ')'
+    }
+    var c = resolveTokenColor(token)
+    if (!c) return 'none'
+    var css = toCss(c)
+    return 'linear-gradient(' + css + ', ' + css + ')'
+  }
+
   function applyState() {
     var next = currentValues()
     var name
@@ -1265,6 +1317,15 @@
       if (preset2 && preset2.scheme) document.documentElement.style.setProperty('color-scheme', preset2.scheme)
       else document.documentElement.style.removeProperty('color-scheme')
     }
+    /*
+     * Floors for the editor's own boxes. NOT declared in the shadow stylesheet,
+     * because a declaration on :host would shadow these inherited ones - the
+     * same trap --workspace-corner fell into.
+     */
+    setVar('--fbts-floor', floorFor('--bg', next) || '#14151a')
+    setVar('--fbts-floor2', floorFor('--chrome', next) || floorFor('--surface', next) || floorFor('--bg', next) || '#14151a')
+    setVar('--fbts-bg-layer', layerFor('--bg', next))
+    setVar('--fbts-panel2-layer', layerFor('--chrome', next))
     applyRaw()
     applyPageStyles(next)
   }
@@ -1986,6 +2047,36 @@
   box-shadow: none;
   overflow: hidden;
   background: var(--fbts-bg);
+  /*
+   * The floor, and why every top-level box in this file needs one.
+   *
+   * The panel is painted with the live theme background, and that can be made
+   * translucent with the picker's Opacity control. A translucent background
+   * here meant the editor itself went see-through: the app showed through the
+   * controls and the page could not be read. So the theme colour is painted
+   * OVER an opaque floor instead of in place of one, and the floor is the
+   * theme's own background at full strength - which is what the translucent
+   * colour would have composited to anyway, so nothing changes until somebody
+   * makes a colour translucent.
+   *
+   * The layer is built in the engine rather than here, because a plain colour is
+   * not a background-image and wrapping it inline would leave the property to
+   * the invalid-at-computed-value-time rule, which resets it to none instead of
+   * keeping the previous declaration.
+   */
+  background-color: var(--fbts-floor, #14151a);
+  background-image: var(--fbts-bg-layer, none);
+}
+
+/* The other boxes that are not inside the panel, so need a floor of their own. */
+.fbts-modal {
+  background-color: var(--fbts-floor, #14151a);
+  background-image: var(--fbts-bg-layer, none);
+}
+.fbts-picker,
+.fbts-update-chip {
+  background-color: var(--fbts-floor2, var(--fbts-floor, #14151a));
+  background-image: var(--fbts-panel2-layer, none);
 }
 
 /* ---- title bar: the page banner, like a plugin's header ---- */

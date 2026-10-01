@@ -206,6 +206,10 @@ hosting anywhere. The trade is size: a picture under about 200 KB keeps saving q
 files up to 2 MB are accepted. If a theme gets too big to save, the panel says so instead
 of quietly failing.
 
+Setting a colour's opacity to anything below fully solid lets the app behind it show
+through, which is the point - but Theme Studio itself stays opaque, so its controls never
+become hard to read. That is deliberate: the editor is where you work.
+
 **Window buttons** are the minimise, maximise and close buttons in the top-right corner.
 They have no colour setting of their own in Freebuff - they just follow the theme's faint
 text colour - so this box exists to set them directly: the icon colour, the hover
@@ -460,6 +464,13 @@ be themed from the root at all. The editor therefore also writes a `<style>` ele
 `<head>`, with those tokens set `!important` on a selector list covering every element the
 app does this to. The same sheet carries the things that are properties rather than custom
 properties: the window buttons, the logo and the background picture.
+
+The editor paints itself with the live theme background, and a translucent background
+colour would otherwise make the editor itself see-through, with the app showing through
+the controls. Every box it owns therefore draws its theme colour as a layer over an opaque
+floor - the theme's own background at full strength, worked out in the engine. Compositing
+a translucent colour over itself gives the solid colour back, so this changes nothing at
+all until somebody makes a colour translucent, and the panel stays readable when they do.
 
 The editor page itself is rendered in a shadow DOM, so Freebuff's styles cannot affect it,
 but it reads its own colours from the app's properties. The result is that the editor is
