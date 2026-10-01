@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.2.0'
+  var VERSION = '1.2.1'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -616,6 +616,47 @@
       else h = ((r - g) / d + 4) * 60
     }
     return { h: h, s: s * 100, l: l * 100 }
+  }
+
+  /*
+   * The in-page colour picker works in HSV, because that is what a saturation
+   * square and a hue strip need. The Colour Spots and the Colors tab both go
+   * through it, so picking a colour never depends on a native dialog.
+   */
+  function rgbToHsv(r, g, b) {
+    r /= 255
+    g /= 255
+    b /= 255
+    var max = Math.max(r, g, b)
+    var min = Math.min(r, g, b)
+    var d = max - min
+    var h = 0
+    if (d) {
+      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60
+      else if (max === g) h = ((b - r) / d + 2) * 60
+      else h = ((r - g) / d + 4) * 60
+    }
+    return { h: h, s: max ? (d / max) * 100 : 0, v: max * 100 }
+  }
+
+  function hsvToHex(h, s, v) {
+    s /= 100
+    v /= 100
+    var c = v * s
+    var x = c * (1 - Math.abs(((h / 60) % 2) - 1))
+    var m = v - c
+    var rgb
+    if (h < 60) rgb = [c, x, 0]
+    else if (h < 120) rgb = [x, c, 0]
+    else if (h < 180) rgb = [0, c, x]
+    else if (h < 240) rgb = [0, x, c]
+    else if (h < 300) rgb = [x, 0, c]
+    else rgb = [c, 0, x]
+    return rgbToHex((rgb[0] + m) * 255, (rgb[1] + m) * 255, (rgb[2] + m) * 255)
+  }
+
+  function hsvaCss(hsv, a) {
+    return toCss({ hex: hsvToHex(hsv.h, hsv.s, hsv.v), a: a })
   }
 
   function hslToHex(hsl) {
@@ -1277,17 +1318,57 @@
 .fbts-knob-label { font-size: 9.5px; line-height: 1.2; color: var(--fbts-mute); text-align: center; }
 .fbts-knob:focus-visible .fbts-knob-dial { outline: 2px solid var(--fbts-accent); outline-offset: 2px; }
 
-/* ---- round colour spots ---- */
-.fbts-circles { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 4px; }
-.fbts-circle { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 64px; }
-.fbts-circle input {
-  width: 30px; height: 30px; padding: 0; flex: none; cursor: pointer;
-  border: 1px solid rgba(0,0,0,.45); border-radius: 50%; background: none;
-  appearance: none; -webkit-appearance: none; box-shadow: var(--fbts-bevel);
+/* ---- colour spots ---- */
+.fbts-spot-row { display: flex; align-items: flex-start; gap: 10px; padding: 5px 0; }
+.fbts-spot-row-label {
+  width: 104px; flex: none; padding-top: 7px; color: var(--fbts-mute);
+  font-size: 9px; letter-spacing: .07em; text-transform: uppercase; font-weight: 700;
 }
-.fbts-circle input::-webkit-color-swatch-wrapper { padding: 0; }
-.fbts-circle input::-webkit-color-swatch { border: none; border-radius: 50%; }
+.fbts-circles { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 7px 2px; }
+.fbts-circle {
+  display: flex; flex-direction: column; align-items: center; gap: 5px; width: 62px;
+  padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer;
+}
+.fbts-spot {
+  width: 30px; height: 30px; flex: none; border: 1px solid rgba(0,0,0,.45); border-radius: 50%;
+  box-shadow: var(--fbts-bevel);
+}
+.fbts-circle:hover .fbts-spot { box-shadow: var(--fbts-bevel), 0 0 0 2px color-mix(in srgb, var(--fbts-accent) 55%, transparent); }
+/* A spot that no longer follows the preset says so. */
+.fbts-circle.overridden .fbts-spot { border-color: var(--fbts-accent); }
+.fbts-circle.overridden .fbts-circle-label { color: var(--fbts-ink); }
+.fbts-circle:focus-visible .fbts-spot { outline: 2px solid var(--fbts-accent); outline-offset: 2px; }
 .fbts-circle-label { font-size: 9.5px; line-height: 1.25; color: var(--fbts-mute); text-align: center; }
+
+/* ---- the colour picker ---- */
+.fbts-picker {
+  position: fixed; z-index: 4; width: 272px; pointer-events: auto; display: none; flex-direction: column;
+  border: 1px solid var(--fbts-line); border-radius: var(--fbts-radius-box);
+  background: var(--fbts-panel2); color: var(--fbts-ink); box-shadow: 0 20px 60px rgba(0,0,0,.6);
+}
+.fbts-picker.show { display: flex; }
+.fbts-picker-head { display: flex; align-items: center; gap: 7px; padding: 7px 9px; border-bottom: 1px solid var(--fbts-line); background: var(--fbts-head-bg); box-shadow: var(--fbts-bevel); }
+.fbts-picker-title { font-size: 11.5px; font-weight: 700; }
+.fbts-picker-token { font-family: var(--fbts-mono); font-size: 9.5px; color: var(--fbts-mute); }
+.fbts-picker-head .grow { flex: 1; }
+.fbts-picker-body { display: flex; flex-direction: column; gap: 9px; padding: 9px; }
+.fbts-sv {
+  position: relative; height: 116px; cursor: crosshair; border: 1px solid var(--fbts-line); border-radius: 4px;
+  background: linear-gradient(to top, #000, rgba(0,0,0,0)), linear-gradient(to right, #fff, var(--fbts-hue-color, #f00));
+}
+.fbts-sv-dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.55); pointer-events: none; }
+.fbts-hue {
+  position: relative; height: 13px; cursor: ew-resize; border: 1px solid var(--fbts-line); border-radius: 7px;
+  background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+.fbts-hue-thumb { position: absolute; top: -3px; width: 7px; height: 17px; margin-left: -3.5px; border-radius: 3px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.55); pointer-events: none; }
+.fbts-picker-row { display: flex; align-items: center; gap: 7px; }
+.fbts-picker-row .fbts-textinput { width: 92px; }
+.fbts-picker-label { width: 34px; flex: none; font-size: 10px; color: var(--fbts-mute); }
+.fbts-preview { width: 26px; height: 26px; flex: none; border: 1px solid var(--fbts-line); border-radius: 4px; }
+.fbts-alpha-wide { flex: 1; min-width: 0; accent-color: var(--fbts-accent); }
+.fbts-picker-foot { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border-top: 1px solid var(--fbts-line); }
+.fbts-picker-foot .grow { flex: 1; }
 
 /* ---- options ---- */
 .fbts-option { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 11.5px; color: var(--fbts-ink); cursor: pointer; }
@@ -1368,7 +1449,7 @@
 .fbts-root.fbts-page-open .fbts-update-chip { right: 26px; bottom: 68px; }
 
 .fbts-modal-wrap {
-  position: fixed; inset: 0; z-index: 3; display: none; place-items: center; padding: 24px;
+  position: fixed; inset: 0; z-index: 6; display: none; place-items: center; padding: 24px;
   pointer-events: auto; background: rgba(0,0,0,.55);
 }
 .fbts-modal-wrap.show { display: grid; }
@@ -1473,12 +1554,13 @@
 .fbts-presets { grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 12px; }
 .fbts-group.scroll > .fbts-group-body { max-height: min(52vh, 520px); }
 .fbts-knobs { gap: 12px 6px; }
+.fbts-spot-row-label { width: 132px; font-size: var(--font-size-caption, 10px); }
+.fbts-circle { width: 74px; }
+.fbts-spot { width: 34px; height: 34px; }
 .fbts-knob { width: 76px; }
 .fbts-knob-dial { width: 50px; height: 50px; }
 .fbts-knob-needle { height: 15px; margin-top: -15px; }
-.fbts-circles { gap: 10px 6px; }
-.fbts-circle { width: 74px; }
-.fbts-circle input { width: 34px; height: 34px; }
+.fbts-circles { gap: 10px 4px; }
 .fbts-row-label { font-size: var(--fbts-ui-size); }
 .fbts-textinput { width: 128px; }
 .fbts-toast { left: 50%; right: auto; bottom: 28px; transform: translate(-50%, 8px); }
@@ -1683,7 +1765,8 @@
       document.head.appendChild(link)
     }
 
-    var root = el('div', { class: 'fbts-root' }, [panel, toast, chip, modalWrap])
+    var picker = colorPicker()
+    var root = el('div', { class: 'fbts-root' }, [panel, toast, chip, modalWrap, picker.node])
     shadow.appendChild(root)
 
     /* ---- title bar ---- */
@@ -1798,6 +1881,182 @@
         ';--t-muted:' + c['--muted'] +
         ';--t-brand:' + c['--brand']
       )
+    }
+
+    /*
+     * The colour picker. One of these lives on the page and is pointed at a
+     * token set whenever a spot or a Colors-tab swatch is clicked, so picking a
+     * colour never depends on the native dialog - which is exactly where the
+     * round spots were failing.
+     */
+    function colorPicker() {
+      var titleEl = el('span', { class: 'fbts-picker-title' })
+      var tokenEl = el('code', { class: 'fbts-picker-token' })
+      var closeBtn = el('button', { class: 'fbts-x', type: 'button', text: '\u00d7', title: 'Close' })
+      var hueState = { h: 0, s: 0, v: 0, a: 1 }
+      var svDot = el('span', { class: 'fbts-sv-dot' })
+      var sv = el('div', { class: 'fbts-sv' }, [svDot])
+      var hueThumb = el('span', { class: 'fbts-hue-thumb' })
+      var hue = el('div', { class: 'fbts-hue' }, [hueThumb])
+      var alpha = el('input', { class: 'fbts-alpha-wide', type: 'range', min: '0', max: '100', step: '1' })
+      var hex = el('input', { class: 'fbts-textinput', type: 'text', spellcheck: 'false' })
+      var preview = el('span', { class: 'fbts-preview' })
+      var resetBtn = el('button', { class: 'fbts-btn', type: 'button', text: 'Reset' })
+      var doneBtn = el('button', { class: 'fbts-btn primary', type: 'button', text: 'Done' })
+      var box = el('div', { class: 'fbts-picker' }, [
+        el('div', { class: 'fbts-picker-head' }, [titleEl, tokenEl, el('div', { class: 'grow' }), closeBtn]),
+        el('div', { class: 'fbts-picker-body' }, [
+          sv,
+          hue,
+          el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Opacity' }), alpha]),
+          el('div', { class: 'fbts-picker-row' }, [el('span', { class: 'fbts-picker-label', text: 'Hex' }), hex, preview]),
+        ]),
+        el('div', { class: 'fbts-picker-foot' }, [resetBtn, el('div', { class: 'grow' }), doneBtn]),
+      ])
+
+      var target = null // { label, tokens: [] }
+      var notify = null
+      var anchor = null
+
+      function paint() {
+        var css = hsvaCss(hueState, hueState.a)
+        sv.style.setProperty('--fbts-hue-color', hsvToHex(hueState.h, 100, 100))
+        svDot.style.left = hueState.s + '%'
+        svDot.style.top = 100 - hueState.v + '%'
+        hueThumb.style.left = (hueState.h / 360) * 100 + '%'
+        alpha.value = String(Math.round(hueState.a * 100))
+        preview.style.background = css
+        hex.value = hsvToHex(hueState.h, hueState.s, hueState.v)
+      }
+
+      /** Write the picker's colour onto every token the target covers. */
+      function push() {
+        if (!target) return
+        var value = { hex: hsvToHex(hueState.h, hueState.s, hueState.v), a: hueState.a }
+        target.tokens.forEach(function (t) {
+          state.colors[t] = value
+          delete state.layout[t]
+        })
+        applyState()
+        saveState(state)
+        paint()
+        refreshSpots()
+        if (notify) notify(value.hex, value.a)
+      }
+
+      /** Adopt the colour a token already has. */
+      function loadCurrent(tokens) {
+        var cur = currentColorFor(tokens[0])
+        var rgb = [parseInt(cur.hex.slice(1, 3), 16), parseInt(cur.hex.slice(3, 5), 16), parseInt(cur.hex.slice(5, 7), 16)]
+        var hsv = rgbToHsv(rgb[0], rgb[1], rgb[2])
+        hueState = { h: hsv.h, s: hsv.s, v: hsv.v, a: cur.a == null ? 1 : cur.a }
+      }
+
+      function open(next, anchorEl) {
+        target = next
+        notify = next.onChange || null
+        anchor = anchorEl
+        loadCurrent(next.tokens)
+        titleEl.textContent = next.label
+        tokenEl.textContent = next.tokens.join(' ')
+        paint()
+        place()
+        box.classList.add('show')
+      }
+
+      /** Keep the popup beside its spot and inside the window. */
+      function place() {
+        if (!anchor || !anchor.isConnected) return
+        var r = anchor.getBoundingClientRect()
+        var w = box.offsetWidth || 272
+        var h = box.offsetHeight || 240
+        var left = r.left + r.width / 2 - w / 2
+        var top = r.top - h - 10
+        if (top < 8) top = r.bottom + 10
+        left = Math.max(8, Math.min(left, window.innerWidth - w - 8))
+        top = Math.max(8, Math.min(top, window.innerHeight - h - 8))
+        box.style.left = Math.round(left) + 'px'
+        box.style.top = Math.round(top) + 'px'
+      }
+
+      function close() {
+        box.classList.remove('show')
+        target = null
+        notify = null
+      }
+
+      function drag(el, onMove) {
+        el.addEventListener('pointerdown', function (e) {
+          if (e.button !== 0) return
+          e.preventDefault()
+          var move = function (ev) { onMove(ev) }
+          move(e)
+          var up = function () {
+            el.removeEventListener('pointermove', move)
+            document.removeEventListener('pointerup', up, true)
+          }
+          el.addEventListener('pointermove', move)
+          document.addEventListener('pointerup', up, true)
+        })
+      }
+
+      drag(sv, function (e) {
+        var r = sv.getBoundingClientRect()
+        hueState.s = bound(((e.clientX - r.left) / r.width) * 100, 0, 100)
+        hueState.v = bound(100 - ((e.clientY - r.top) / r.height) * 100, 0, 100)
+        push()
+      })
+      drag(hue, function (e) {
+        var r = hue.getBoundingClientRect()
+        hueState.h = bound(((e.clientX - r.left) / r.width) * 360, 0, 360)
+        push()
+      })
+
+      alpha.addEventListener('input', function () {
+        hueState.a = bound(parseFloat(alpha.value) / 100, 0, 1)
+        push()
+      })
+      hex.addEventListener('input', function () {
+        var parsed = parseColor(hex.value)
+        if (!parsed) return
+        var rgb = [parseInt(parsed.hex.slice(1, 3), 16), parseInt(parsed.hex.slice(3, 5), 16), parseInt(parsed.hex.slice(5, 7), 16)]
+        var hsv = rgbToHsv(rgb[0], rgb[1], rgb[2])
+        hueState.h = hsv.h
+        hueState.s = hsv.s
+        hueState.v = hsv.v
+        push()
+      })
+      resetBtn.addEventListener('click', function () {
+        if (!target) return
+        target.tokens.forEach(function (t) {
+          delete state.colors[t]
+        })
+        applyState()
+        saveState(state)
+        loadCurrent(target.tokens)
+        paint()
+        refreshSpots()
+        if (notify) notify(hsvToHex(hueState.h, hueState.s, hueState.v), hueState.a)
+        showToast('Back to the preset')
+      })
+      closeBtn.addEventListener('click', close)
+      doneBtn.addEventListener('click', close)
+      document.addEventListener(
+        'pointerdown',
+        function (e) {
+          if (!box.classList.contains('show')) return
+          var path = e.composedPath ? e.composedPath() : []
+          if (path.indexOf(box) !== -1) return
+          // clicking another spot re-targets instead of closing
+          for (var i = 0; i < path.length; i++) {
+            if (path[i] && path[i].classList && path[i].classList.contains('fbts-circle')) return
+          }
+          close()
+        },
+        true,
+      )
+
+      return { node: box, open: open, close: close, place: place, isOpen: function () { return box.classList.contains('show') } }
     }
 
     /*
@@ -1918,16 +2177,18 @@
       return resolveTokenColor(token) || { hex: '#808080', a: 1 }
     }
 
-    /** Quick spots keep the alpha the token already had. */
-    function setTokenColor(token, hex) {
-      var cur = currentColorFor(token)
-      setOverride(token, { hex: hex, a: cur.a == null ? 1 : cur.a })
-    }
-
-    function refreshCircles() {
-      QUICK_TOKENS.forEach(function (pair) {
-        var input = circleInputs[pair[0]]
-        if (input) input.value = currentColorFor(pair[0]).hex
+    /** Redraw every spot from the live colours, and mark the ones you changed. */
+    function refreshSpots() {
+      spotNodes.forEach(function (s) {
+        s.dot.style.background = toCss(currentColorFor(s.tokens[0]))
+        var changed = false
+        for (var i = 0; i < s.tokens.length; i++) if (state.colors[s.tokens[i]]) changed = true
+        s.node.classList.toggle('overridden', changed)
+      })
+      // Keep the Colors tab swatches in step with the picker.
+      Array.prototype.forEach.call(shadow.querySelectorAll('.fbts-swatchinput'), function (sw) {
+        var row = sw.closest('[data-token]')
+        if (row) sw.style.background = toCss(currentColorFor(row.dataset.token))
       })
     }
 
@@ -1938,37 +2199,49 @@
     /* ---- color row ---- */
     function colorRow(token, labelText) {
       var initial = currentColorFor(token)
-      var colorInput = el('input', { class: 'fbts-swatchinput', type: 'color', value: initial.hex })
+      // The swatch opens the in-page picker rather than a native colour dialog.
+      var colorInput = el('button', { class: 'fbts-swatchinput', type: 'button', title: 'Pick a colour' })
+      colorInput.style.background = toCss(initial)
       var alpha = el('input', { class: 'fbts-alpha', type: 'range', min: '0', max: '100', step: '1', value: String(Math.round(initial.a * 100)) })
       var hex = el('input', { class: 'fbts-textinput', type: 'text', value: initial.hex, spellcheck: 'false' })
       var reset = el('button', { class: 'fbts-mini', title: 'Reset', text: '\u21ba' })
 
-      function push(commitNow) {
-        var parsed = parseColor(colorInput.value) || { hex: '#000000', a: 1 }
-        var a = parseFloat(alpha.value) / 100
-        if (commitNow) {
-          setOverride(token, { hex: parsed.hex, a: a })
-        }
+      function paintSwatch(hexValue, a) {
+        colorInput.style.background = toCss({ hex: hexValue, a: a == null ? 1 : a })
       }
 
-      colorInput.addEventListener('input', function () {
-        hex.value = colorInput.value
-        push(true)
+      function push(commitNow) {
+        var parsed = parseColor(hex.value) || { hex: '#000000', a: 1 }
+        var a = parseFloat(alpha.value) / 100
+        paintSwatch(parsed.hex, a)
+        if (commitNow) setOverride(token, { hex: parsed.hex, a: a })
+      }
+
+      colorInput.addEventListener('click', function () {
+        picker.open(
+          {
+            label: labelText || token,
+            tokens: [token],
+            onChange: function (picked, a) {
+              hex.value = picked
+              alpha.value = String(Math.round(a * 100))
+              paintSwatch(picked, a)
+            },
+          },
+          colorInput,
+        )
       })
       hex.addEventListener('input', function () {
         var parsed = parseColor(hex.value)
-        if (parsed) {
-          colorInput.value = parsed.hex
-          push(true)
-        }
+        if (parsed) push(true)
       })
       alpha.addEventListener('input', function () { push(true) })
       reset.addEventListener('click', function () {
         setOverride(token, null)
         var fresh = resolveTokenColor(token) || { hex: '#808080', a: 1 }
-        colorInput.value = fresh.hex
         hex.value = fresh.hex
         alpha.value = String(Math.round(fresh.a * 100))
+        paintSwatch(fresh.hex, fresh.a)
         showToast('Reset ' + token)
       })
 
@@ -2057,45 +2330,101 @@
       ),
     )
 
-    /* Round spots for the colours people change most. */
-    var QUICK_TOKENS = [
-      ['--bg', 'Background'],
-      ['--surface', 'Surface'],
-      ['--chrome', 'Chrome'],
-      ['--text', 'Text'],
-      ['--muted', 'Muted text'],
-      ['--brand-2', 'Brand'],
-      ['--accent', 'Accent'],
-      ['--danger', 'Danger'],
+    /*
+     * Colour spots: the tokens people reach for, in rows by job. One spot can
+     * stand for several tokens (--brand and --brand-2 are the same colour in
+     * every preset, and setting only one of them would half-apply).
+     */
+    var SPOT_GROUPS = [
+      ['Surfaces', [
+        ['Background', ['--bg', '--workspace-surface']],
+        ['Chrome', ['--chrome', '--shell-base']],
+        ['Sidebar', ['--sidebar-canvas', '--sidebar-row-background']],
+        ['Surface', ['--surface']],
+        ['Surface 2', ['--surface-2', '--input', '--bubble']],
+        ['Raised', ['--raised', '--popover', '--selected']],
+      ]],
+      ['Text', [
+        ['Text', ['--text', '--sidebar-ink']],
+        ['Muted', ['--muted', '--sidebar-muted']],
+        ['Faint', ['--faint', '--placeholder']],
+        ['Accent text', ['--accent']],
+        ['Button text', ['--primary-action-text']],
+      ]],
+      ['Brand', [
+        ['Brand', ['--brand', '--brand-2']],
+        ['Brand light', ['--brand-1']],
+        ['Brand tint', ['--brand-3']],
+        ['Brand dim', ['--brand-dim']],
+        ['Primary action', ['--primary-action']],
+        ['Links', ['--brand-ink']],
+      ]],
+      ['Lines and status', [
+        ['Border', ['--border', '--control-border']],
+        ['Ok', ['--ok', '--green']],
+        ['Warning', ['--warn', '--premium']],
+        ['Danger', ['--danger']],
+        ['Info', ['--info']],
+      ]],
+      ['Code', [
+        ['Comment', ['--syntax-comment']],
+        ['Keyword', ['--syntax-keyword']],
+        ['String', ['--syntax-string']],
+        ['Number', ['--syntax-number']],
+        ['Function', ['--syntax-function']],
+        ['Type', ['--syntax-type']],
+        ['Property', ['--syntax-property']],
+      ]],
     ]
-    var circlesRow = el('div', { class: 'fbts-circles' })
-    var circleInputs = {}
-    QUICK_TOKENS.forEach(function (pair) {
-      var token = pair[0]
-      var input = el('input', { type: 'color', value: currentColorFor(token).hex })
-      input.addEventListener('input', function () { setTokenColor(token, input.value) })
-      input.addEventListener('contextmenu', function (e) {
-        e.preventDefault()
-        setOverride(token, null)
-        input.value = currentColorFor(token).hex
-        showToast('Reset ' + token)
+
+    var allSpotTokens = []
+    var spotsRow = el('div')
+    var spotNodes = []
+    SPOT_GROUPS.forEach(function (entry) {
+      var row = el('div', { class: 'fbts-circles' })
+      entry[1].forEach(function (spot) {
+        var label = spot[0]
+        var tokens = spot[1]
+        allSpotTokens = allSpotTokens.concat(tokens)
+        var dot = el('span', { class: 'fbts-spot' })
+        function handBack() {
+          var changed = false
+          tokens.forEach(function (t) {
+            if (state.colors[t]) changed = true
+            delete state.colors[t]
+          })
+          if (!changed) return
+          applyState()
+          saveState(state, true)
+          refreshSpots()
+          picker.close()
+          showToast(label + ' is back to the preset')
+        }
+        var btn = el('button', {
+          class: 'fbts-circle', type: 'button',
+          title: label + ' - ' + tokens.join(', ') + ' (right-click to hand it back to the preset)',
+          onclick: function () { picker.open({ label: label, tokens: tokens }, btn) },
+          oncontextmenu: function (e) { e.preventDefault(); handBack() },
+        }, [dot, el('span', { class: 'fbts-circle-label', text: label })])
+        spotNodes.push({ tokens: tokens, dot: dot, node: btn })
+        row.appendChild(btn)
       })
-      circleInputs[token] = input
-      circlesRow.appendChild(
-        el('label', { class: 'fbts-circle', title: 'Click to pick a colour, right-click to reset' }, [
-          input,
-          el('span', { class: 'fbts-circle-label', text: pair[1] }),
-        ]),
-      )
+      spotsRow.appendChild(el('div', { class: 'fbts-spot-row' }, [el('span', { class: 'fbts-spot-row-label', text: entry[0] }), row]))
     })
     presetsPane.appendChild(
-      group('Quick colours', [circlesRow], {
+      group('Colour spots', [
+        spotsRow,
+        el('div', { class: 'fbts-note', style: 'margin-top:8px', text: 'Click a spot to pick a colour for it. Right-click one to hand it back to the preset. Every other colour is in the Colors tab.' }),
+      ], {
         actions: [
-          headLink('Reset', 'Clear these overrides', function () {
-            QUICK_TOKENS.forEach(function (pair) { setOverride(pair[0], null) })
-            refreshCircles()
-            showToast('Quick colours reset')
+          headLink('Reset', 'Hand every spot back to the preset', function () {
+            allSpotTokens.forEach(function (t) { delete state.colors[t] })
+            applyState()
+            saveState(state, true)
+            refreshSpots()
+            showToast('Colour spots reset')
           }),
+          headLink('All colours', 'Open the Colors tab', function () { selectTab('colors') }),
         ],
       }),
     )
@@ -2511,7 +2840,10 @@
       // The generated boxes only; the import box belongs to whoever is typing.
       exportArea.value = JSON.stringify(themeDocument(state), null, 2)
       shareInput.value = shareCode(state)
-      schemeLabel.textContent = 'v' + VERSION + '  \u00b7  ' + (state.preset === 'default' ? 'custom' : state.preset)
+      // Name the preset actually in use - 'default' is a real preset (Freebuff
+      // Default), so reporting it as "custom" was just confusing.
+      var inUse = PRESET_BY_ID[state.preset]
+      schemeLabel.textContent = 'v' + VERSION + '  \u00b7  ' + (inUse ? inUse.label : 'custom')
     }
 
     function rebuild() {
@@ -2522,10 +2854,10 @@
           // re-seed every row from state
           Array.prototype.forEach.call(p.querySelectorAll('[data-token]'), function (row) {
             var token = row.dataset.token
-            var colorInput = row.querySelector('input[type=color]')
+            var colorInput = row.querySelector('.fbts-swatchinput')
             if (colorInput) {
               var c = currentColorFor(token)
-              colorInput.value = c.hex
+              colorInput.style.background = toCss(c)
               var txt = row.querySelector('input[type=text]')
               if (txt) txt.value = c.hex
               var alpha = row.querySelector('input[type=range]')
@@ -2540,7 +2872,7 @@
       rawArea.value = state.raw || ''
       nameInput.value = state.name || ''
       refreshKnobs()
-      refreshCircles()
+      refreshSpots()
       refreshActive()
     }
 
@@ -2597,6 +2929,8 @@
     } catch (e) {}
 
     selectTab('presets')
+    refreshSpots()
+    refreshKnobs()
     refreshActive()
 
     // One quiet check per session, well clear of the app's own startup work.

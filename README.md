@@ -92,10 +92,29 @@ Drag a dial up or down, scroll on it, or click it and use the arrow keys. Hold `
 for bigger steps. Double-click a dial to put it back to the middle, or use **Reset** in the
 box header to reset all five at once.
 
-**Quick colours** puts the eight colours people change most often on round spots:
-background, surface, chrome, text, muted text, brand, accent and danger. Click a spot to
-pick a colour, or right-click it to hand that colour back to the preset. **Reset** clears
-all eight overrides.
+**Colour spots** puts the colours people change most often on round spots, in five rows
+by job:
+
+| Row | Spots |
+| --- | --- |
+| Surfaces | Background, Chrome, Sidebar, Surface, Surface 2, Raised |
+| Text | Text, Muted, Faint, Accent text, Button text |
+| Brand | Brand, Brand light, Brand tint, Brand dim, Primary action, Links |
+| Lines and status | Border, Ok, Warning, Danger, Info |
+| Code | Comment, Keyword, String, Number, Function, Type, Property |
+
+Click a spot and a small colour picker opens next to it: a square for the shade, a strip
+for the hue, an opacity slider and a box for typing an exact colour code. Reset hands the
+colour back to the preset; Done and `Esc` close the picker. You can also right-click a
+spot to hand that colour back straight away. A spot that you have changed keeps a ring
+around it, so you can see at a glance what you have overridden. **Reset** in the box header
+clears every spot override at once.
+
+A few spots cover more than one colour: Brand sets both brand shades, Background sets the
+app background and the workspace, and so on.
+
+**All colours** in the box header jumps to the Colors tab, which has every colour
+Freebuff uses plus a search box in the Advanced tab.
 
 **Options** is the app's own light or dark preference. Auto, Dark and Light only tell
 Freebuff how to draw things it controls itself, such as scrollbars and dropdown menus.
@@ -116,7 +135,9 @@ This is where you fine-tune. Colours are grouped so you can find what you want:
 | Effects | Shadows and focus outlines |
 
 Each row has a colour swatch, a slider for transparency, a box for typing an exact
-colour code, and a small arrow button to reset just that one colour.
+colour code, and a small arrow button to reset just that one colour. Clicking the swatch
+opens the same picker as the spots on the Presets tab, and whatever you pick is typed back
+into the row.
 
 Changes appear as you make them. There is no save button.
 
@@ -220,7 +241,7 @@ A `.fbtheme` file is that theme inside a small wrapper, so the file can say what
 {
   "format": "fbtheme",
   "formatVersion": 1,
-  "app": "Freebuff Theme Studio v1.1.1",
+  "app": "Freebuff Theme Studio v1.2.1",
   "created": "2026-10-01T12:00:00.000Z",
   "theme": { "v": 1, "name": "Midnight Blue", "preset": "midnight", "colors": {}, "layout": {} }
 }
