@@ -1,0 +1,10 @@
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# artifacts left behind when the injector is run against the sandbox tree
+sandbox/fake-install/resources/orchestrator/ui/assets/freebuff-theme-studio.js
+sandbox/fake-install/resources/orchestrator/ui/assets/freebuff-theme-default.js
+sandbox/fake-install/resources/orchestrator/ui/index.html.freebuff-theme-original.bak
+sandbox/fake-install/resources/orchestrator/ui/.freebuff-theme-studio.json
