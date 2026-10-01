@@ -29,9 +29,14 @@
    * version as a custom property, and getComputedStyle() can read that even
    * when the CSSOM of a cross-origin sheet is off limits. So the check needs
    * neither CORS nor a proxy, and it degrades to silence if it ever fails.
+   *
+   * The feed is served by jsDelivr rather than raw.githubusercontent.com,
+   * because raw serves every .css as text/plain with X-Content-Type-Options:
+   * nosniff - and a browser refuses to apply a cross-origin stylesheet that is
+   * not text/css. jsDelivr sends text/css, and it is the same GitHub file.
    * ------------------------------------------------------------------ */
 
-  var UPDATE_FEED = 'https://raw.githubusercontent.com/RichardFlp/freebuff-ui/main/update.css'
+  var UPDATE_FEED = 'https://cdn.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css'
   var RELEASES_URL = 'https://github.com/RichardFlp/freebuff-ui/releases/tag/v'
   var UPDATE_PROBE = 'data-fbts-update-probe'
   var REMOTE_VERSION_VAR = '--fbts-remote-version'
@@ -1321,7 +1326,10 @@
 
       var link = document.createElement('link')
       link.rel = 'stylesheet'
-      link.href = UPDATE_FEED
+      // jsDelivr lets the browser keep this for a week and its edge for 12
+      // hours, so ask with a per-day address: one real request a day, and a
+      // new release is noticed within that window rather than within a week.
+      link.href = UPDATE_FEED + '?d=' + new Date().toISOString().slice(0, 10)
       var settled = false
 
       function settle(version) {

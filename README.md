@@ -285,8 +285,8 @@ survives compact mode, a collapsed sidebar, and Freebuff's separate thread windo
 
 Freebuff's page policy allows remote stylesheets but blocks `fetch()` to anything outside
 `127.0.0.1`, so the page cannot call the GitHub API. Instead it loads
-[update.css](update.css) from this repository's `main` branch and reads one value out of
-it with `getComputedStyle`, which works for a cross-origin stylesheet without CORS.
+[update.css](update.css) and reads one value out of it with `getComputedStyle`, which
+works for a cross-origin stylesheet without CORS.
 
 The file declares nothing but a version:
 
@@ -296,7 +296,17 @@ html[data-fbts-update-probe] {
 }
 ```
 
-If the file cannot be loaded - offline, GitHub down, or a future Freebuff policy that
+The editor asks for it through `cdn.jsdelivr.net`, which is a read-only mirror of this
+repository's `main` branch. `raw.githubusercontent.com` cannot be used for this: it serves
+CSS as `text/plain` with `X-Content-Type-Options: nosniff`, and a browser refuses to apply
+a cross-origin stylesheet that is not `text/css`. jsDelivr serves the same file as
+`text/css`, so no CORS and no extra hosting are needed.
+
+jsDelivr lets browsers keep a file for a week, so the request carries a per-day query
+string. That means at most one real request per day, and a new release is picked up within
+hours rather than within a week.
+
+If the file cannot be loaded - offline, CDN trouble, or a future Freebuff policy that
 blocks it - the check fails quietly and nothing is shown.
 
 **Releasing a new version** means three edits, then a push:
