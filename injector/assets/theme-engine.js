@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.3.3'
+  var VERSION = '1.3.4'
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -43,6 +43,16 @@
    */
   var FEED_PATH = '/gh/RichardFlp/freebuff-ui@main/update.css'
   var FEED_HOSTS = ['https://cdn.jsdelivr.net', 'https://fastly.jsdelivr.net', 'https://gcore.jsdelivr.net']
+  /*
+   * A fourth edge that is not jsDelivr. The three jsDelivr networks have been
+   * seen serving three different versions of this file at the same moment, and
+   * a release that only reaches a stale edge is a release nobody is told about
+   * - which is how "auto update does not work" starts. Taking the newest answer
+   * from every host, including one with a day-long cache instead of a week-long
+   * one, means one fresh host is enough.
+   */
+  var FEED_MIRRORS = ['https://cdn.statically.io/gh/RichardFlp/freebuff-ui@main/update.css']
+  var FEED_URLS = FEED_HOSTS.map(function (h) { return h + FEED_PATH }).concat(FEED_MIRRORS)
   var UPDATE_FEED = FEED_HOSTS[0] + FEED_PATH
   var RELEASES_URL = 'https://github.com/RichardFlp/freebuff-ui/releases/tag/v'
   var UPDATE_PROBE = 'data-fbts-update-probe'
@@ -82,7 +92,8 @@
    * knowing exactly how big it will be.
    */
   var COOKIE_CHUNK = 3400
-  var COOKIE_MAX_THEME_CHUNKS = 2
+  var COOKIE_MAX_THEME_CHUNKS = 3
+  var COOKIE_MAX_RAW = 900
 
   /*
    * Why the theme budget is two chunks and nothing else is stored.
@@ -97,10 +108,12 @@
    * in the profile. That is the reported "installed a custom picture, now I get
    * a grey window" bug.
    *
-   * Two chunks is 6.8 KB, which holds the largest theme the panel can build
-   * (all 101 registry tokens overridden is 6.4 KB encoded) with the whole of
-   * the app's own cookie jar on top. Pictures are not stored in cookies at all;
-   * see the note on pictures below.
+   * Three chunks is 10.2 KB, which holds a theme with every preset token and a
+   * large layout map overridden, with room for the app's own cookie jar on top.
+   * Pictures are not stored in cookies at all; see the note on pictures below.
+   * A save goes to a fresh generation beside the old one, so the worst case is
+   * one old series of at most 10.2 KB plus the new one - still inside the
+   * budget, and the old series is deleted in the same save.
    */
   /* Cookie series written by 1.3.2 and earlier, which stored pictures in
    * cookies. They are read once and then removed for good. */
@@ -390,7 +403,8 @@
   }
 
   var PRESETS = [
-    { id: 'default', label: 'Freebuff Default', scheme: 'dark', colors: null },
+    // `scheme: null` means "whatever appearance the app itself is set to".
+    { id: 'default', label: 'Freebuff Default', scheme: null, colors: null },
 
     {
       id: 'midnight', label: 'Midnight Blue', scheme: 'dark',
@@ -589,13 +603,23 @@
     m = /^rgba?\(([^)]+)\)$/.exec(s)
     if (m) {
       var parts = m[1].split(/[\s,/]+/).filter(Boolean)
-      if (parts.length < 3) return null
-      var r = parseFloat(parts[0])
-      var g = parseFloat(parts[1])
-      var b = parseFloat(parts[2])
-      var a = parts.length > 3 ? parseFloat(parts[3]) : 1
-      if (isNaN(r) || isNaN(g) || isNaN(b)) return null
-      return { hex: rgbToHex(r, g, b), a: isNaN(a) ? 1 : a }
+      if (parts.length < 3 || parts.length > 4) return null
+      function channel(part) {
+        if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)%?$/.test(part)) return NaN
+        var n = parseFloat(part)
+        return /%$/.test(part) ? n * 2.55 : n
+      }
+      var r = channel(parts[0])
+      var g = channel(parts[1])
+      var b = channel(parts[2])
+      var a = 1
+      if (parts.length === 4) {
+        if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)%?$/.test(parts[3])) return null
+        a = parseFloat(parts[3])
+        if (/%$/.test(parts[3])) a /= 100
+      }
+      if (!isFinite(r) || !isFinite(g) || !isFinite(b) || !isFinite(a)) return null
+      return { hex: rgbToHex(r, g, b), a: bound(a, 0, 1) }
     }
     return null
   }
@@ -614,11 +638,12 @@
   function toCss(color) {
     if (!color) return ''
     if (typeof color === 'string') return color
-    if (!color.a || color.a >= 1) return color.hex
+    var alpha = color.a == null ? 1 : bound(Number(color.a), 0, 1)
+    if (!isFinite(alpha) || alpha >= 1) return color.hex
     var r = parseInt(color.hex.slice(1, 3), 16)
     var g = parseInt(color.hex.slice(3, 5), 16)
     var b = parseInt(color.hex.slice(5, 7), 16)
-    return 'rgb(' + r + ' ' + g + ' ' + b + ' / ' + Math.round(color.a * 100) + '%)'
+    return 'rgb(' + r + ' ' + g + ' ' + b + ' / ' + Math.round(alpha * 100) + '%)'
   }
 
   /* ------------------------------------------------------------------ *
@@ -794,6 +819,19 @@
   /* The minimise / maximise / close buttons. '' means "leave it to the theme". */
   var DEFAULT_WINDOW = { ink: '', hoverBg: '', hoverInk: '', closeBg: '', closeInk: '' }
 
+  /*
+   * Editor behaviour, kept with the theme so it travels with a .fbtheme file
+   * and is restored with it.
+   *
+   *   followThemeAppearance - a theme may switch Freebuff's own light/dark
+   *     appearance to match its palette. On by default, because a dark theme
+   *     on an app left in light mode was exactly the half-applied look this
+   *     was added to fix. Off leaves the app's own setting alone.
+   *   autoUpdate - the quiet hourly check for a newer release. The button on
+   *     the Settings tab always works whatever this says.
+   */
+  var DEFAULT_SETTINGS = { followThemeAppearance: true, autoUpdate: true }
+
   var DEFAULT_STATE = {
     v: 1,
     name: 'Custom',
@@ -807,6 +845,7 @@
     raw: '',
     scheme: '',
     adjust: clone(DEFAULT_ADJUST),
+    settings: clone(DEFAULT_SETTINGS),
   }
 
   function clone(o) {
@@ -821,17 +860,59 @@
    * the format people will actually want for a logo, but a script inside one is
    * not.
    */
+  function decodeSvgDataUrl(s) {
+    var comma = s.indexOf(',')
+    if (comma < 0) return ''
+    var header = s.slice(0, comma)
+    var body = s.slice(comma + 1)
+    try {
+      if (/;base64$/i.test(header)) {
+        var binary = atob(body.replace(/\s+/g, ''))
+        var bytes = new Uint8Array(binary.length)
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      }
+      return decodeURIComponent(body)
+    } catch (e) {
+      return ''
+    }
+  }
+
+  function safeSvgText(svg) {
+    if (!svg || /<!DOCTYPE|<!ENTITY/i.test(svg)) return false
+    var doc
+    try {
+      doc = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    } catch (e) {
+      return false
+    }
+    if (!doc || doc.querySelector('parsererror') || !doc.documentElement || doc.documentElement.localName !== 'svg') return false
+    var active = /^(script|foreignobject|iframe|object|embed|animate|animatemotion|animatetransform|set)$/i
+    var nodes = doc.querySelectorAll('*')
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i]
+      if (active.test(node.localName || node.nodeName)) return false
+      for (var j = 0; j < node.attributes.length; j++) {
+        var attr = node.attributes[j]
+        var name = String(attr.name || '').toLowerCase()
+        var value = String(attr.value || '')
+        if (/^on[a-z]/i.test(name)) return false
+        if ((name === 'href' || name === 'xlink:href') && value && value.charAt(0) !== '#') return false
+        if (/javascript:|expression\s*\(|@import|url\s*\((?!\s*['\"]?#)/i.test(value)) return false
+      }
+      if (node.localName === 'style' && /javascript:|expression\s*\(|@import|url\s*\((?!\s*['\"]?#)/i.test(node.textContent || '')) return false
+    }
+    return true
+  }
+
   function cleanDataUrl(v) {
     var s = typeof v === 'string' ? v.trim() : ''
-    if (!s) return ''
-    if (!/^data:image\/(png|jpe?g|gif|webp|avif|svg\+xml)[;,]/i.test(s)) return ''
+    if (!s || s.length > 12 * 1024 * 1024) return ''
+    var m = /^data:image\/(png|jpe?g|gif|webp|avif|svg\+xml)(?:;charset=[a-z0-9._-]+)?(?:;base64)?,/i.exec(s)
+    if (!m) return ''
     if (/^data:image\/svg\+xml/i.test(s)) {
-      var head = s.slice(0, 4000)
-      var decoded = head
-      try {
-        decoded = decodeURIComponent(head)
-      } catch (e) {}
-      if (/<script/i.test(decoded) || /on\w+\s*=/i.test(decoded)) return ''
+      var svg = decodeSvgDataUrl(s)
+      if (!safeSvgText(svg)) return ''
     }
     return s
   }
@@ -888,7 +969,7 @@
         var w = img.naturalWidth || img.width || 0
         var h = img.naturalHeight || img.height || 0
         if (!w || !h) return done(cleanDataUrl(src))
-        var mime = limit.lossy ? (canEncodeWebp() ? 'image/webp' : 'image/jpeg') : 'image/png'
+        var mime = limit.lossy && canEncodeWebp() ? 'image/webp' : 'image/png'
         var scale = Math.min(1, limit.maxSide / Math.max(w, h))
         var best = null
         for (var round = 0; round < 9; round++) {
@@ -899,13 +980,8 @@
           canvas.height = sh
           var ctx = canvas.getContext('2d')
           if (!ctx) break
-          if (mime === 'image/jpeg') {
-            // JPEG has no alpha, and an unpainted canvas is black.
-            ctx.fillStyle = '#000000'
-            ctx.fillRect(0, 0, sw, sh)
-          }
           ctx.drawImage(img, 0, 0, sw, sh)
-          var qualities = limit.lossy ? [0.85, 0.72, 0.6] : [null]
+          var qualities = mime === 'image/webp' ? [0.85, 0.72, 0.6] : [null]
           for (var q = 0; q < qualities.length; q++) {
             var candidate = qualities[q] === null ? canvas.toDataURL(mime) : canvas.toDataURL(mime, qualities[q])
             if (!candidate || candidate.indexOf('data:image/') !== 0) continue
@@ -915,9 +991,8 @@
           if (Math.max(sw, sh) <= limit.minSide) break
           scale *= 0.7
         }
-        // Nothing fitted: hand back the smallest attempt, so the picture is
-        // still shown this session, and let the save path say it is too big.
-        done(best)
+        // Never pass an image over the stated budget into persistent state.
+        done(best && dataUrlBytes(best) <= limit.maxBytes ? best : null)
       } catch (e) {
         done(null)
       }
@@ -1019,6 +1094,7 @@
     var out = {}
     if (!raw || typeof raw !== 'object') return out
     for (var k in raw) {
+      if (!Object.prototype.hasOwnProperty.call(raw, k)) continue
       var v = sanitizeLayoutValue(k, raw[k])
       if (v !== '') out[k] = v
     }
@@ -1030,7 +1106,7 @@
     var out = {}
     if (!raw || typeof raw !== 'object') return out
     for (var k in raw) {
-      if (!TOKEN_NAME_RE.test(k)) continue
+      if (!Object.prototype.hasOwnProperty.call(raw, k) || !TOKEN_NAME_RE.test(k)) continue
       var entry = raw[k]
       var c = parseColor(entry && entry.hex ? entry.hex : entry)
       if (!c) continue
@@ -1057,6 +1133,7 @@
   }
 
   function num(v, lo, hi, fallback) {
+    if (v == null || v === '') return fallback
     var n = Number(v)
     if (!isFinite(n)) return fallback
     return Math.min(hi, Math.max(lo, n))
@@ -1070,10 +1147,13 @@
     var out = {}
     if (!raw || typeof raw !== 'object') return out
     for (var k in raw) {
+      if (!Object.prototype.hasOwnProperty.call(raw, k) || !TOKEN_NAME_RE.test(k)) continue
       var g = raw[k]
       if (!g || typeof g !== 'object') continue
-      var from = parseColor(g.from && g.from.hex) ? { hex: parseColor(g.from.hex).hex, a: num(g.from.a, 0, 1, 1) } : null
-      var to = parseColor(g.to && g.to.hex) ? { hex: parseColor(g.to.hex).hex, a: num(g.to.a, 0, 1, 1) } : null
+      var fromColor = parseColor(g.from && g.from.hex)
+      var toColor = parseColor(g.to && g.to.hex)
+      var from = fromColor ? { hex: fromColor.hex, a: num(g.from.a, 0, 1, fromColor.a) } : null
+      var to = toColor ? { hex: toColor.hex, a: num(g.to.a, 0, 1, toColor.a) } : null
       if (!from || !to) continue
       out[k] = {
         type: oneOf(g.type, ['linear', 'radial'], 'linear'),
@@ -1088,8 +1168,8 @@
   function normalizeState(raw) {
     var s = clone(DEFAULT_STATE)
     if (raw && typeof raw === 'object') {
-      if (raw.name) s.name = String(raw.name)
-      if (raw.preset) s.preset = String(raw.preset)
+      if (raw.name) s.name = String(raw.name).trim().slice(0, 80) || 'Custom'
+      if (raw.preset && PRESET_BY_ID[String(raw.preset)]) s.preset = String(raw.preset)
       if (raw.colors && typeof raw.colors === 'object') s.colors = normalizeColors(raw.colors)
       if (raw.layout && typeof raw.layout === 'object') s.layout = filterLayout(raw.layout)
       s.gradients = normalizeGradients(raw.gradients)
@@ -1101,7 +1181,7 @@
           position: oneOf(b.position, ['center', 'top', 'bottom', 'left', 'right'], 'center'),
           opacity: num(b.opacity, 0, 1, 1),
           dim: num(b.dim, 0, 0.9, 0),
-          whole: !!b.whole,
+          whole: b.whole === true,
         }
       }
       if (raw.logo && typeof raw.logo === 'object') {
@@ -1116,12 +1196,21 @@
         var w = {}
         for (var wk in DEFAULT_WINDOW) {
           var wv = raw.window[wk]
-          w[wk] = wv ? toCss(parseColor(wv) || { hex: '#000000', a: 1 }) : ''
+          var wc = wv ? parseColor(wv) : null
+          w[wk] = wc ? toCss(wc) : ''
         }
         s.window = w
       }
-      if (typeof raw.raw === 'string') s.raw = raw.raw
-      if (raw.scheme) s.scheme = String(raw.scheme)
+      if (typeof raw.raw === 'string') s.raw = raw.raw.slice(0, 256 * 1024)
+      else if (raw.raw != null) s.raw = ''
+      if (raw.scheme === 'light' || raw.scheme === 'dark') s.scheme = raw.scheme
+      if (raw.settings && typeof raw.settings === 'object') {
+        for (var sk in DEFAULT_SETTINGS) {
+          if (Object.prototype.hasOwnProperty.call(raw.settings, sk) && typeof raw.settings[sk] === 'boolean') {
+            s.settings[sk] = raw.settings[sk]
+          }
+        }
+      }
       s.adjust = normalizeAdjust(raw.adjust)
     }
     return s
@@ -1132,6 +1221,7 @@
     var out = clone(DEFAULT_ADJUST)
     if (raw && typeof raw === 'object') {
       ADJUST_DEFS.forEach(function (d) {
+        if (!Object.prototype.hasOwnProperty.call(raw, d.key) || raw[d.key] == null || raw[d.key] === '') return
         var v = Number(raw[d.key])
         if (isFinite(v)) out[d.key] = bound(v, d.min, d.max)
       })
@@ -1205,9 +1295,11 @@
   function parseThemeText(text) {
     var raw = String(text == null ? '' : text).trim()
     if (!raw) throw new Error('nothing to read')
+    if (raw.length > 12 * 1024 * 1024) throw new Error('theme is too large')
     if (raw.indexOf(SHARE_PREFIX) === 0) {
       raw = fromBase64Url(raw.slice(SHARE_PREFIX.length).replace(/\s+/g, ''))
     }
+    if (raw.length > 8 * 1024 * 1024) throw new Error('theme is too large')
     var obj = unwrapTheme(JSON.parse(raw))
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('not a theme')
     return normalizeState(obj)
@@ -1229,6 +1321,15 @@
     if (s.logo && s.logo.image) out.logo = s.logo
     if (s.background && s.background.image) out.background = s.background
     if (s.window && windowIsSet(s.window)) out.window = s.window
+    // Only the non-default editor settings travel: a theme that says nothing
+    // about them should leave the reader's own choices alone.
+    if (s.settings) {
+      var changed = {}
+      for (var sk in DEFAULT_SETTINGS) {
+        if (s.settings[sk] !== DEFAULT_SETTINGS[sk]) changed[sk] = s.settings[sk]
+      }
+      if (Object.keys(changed).length) out.settings = changed
+    }
     return SHARE_PREFIX + toBase64Url(JSON.stringify(out))
   }
 
@@ -1247,12 +1348,19 @@
 
   function readCookie(name) {
     var m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'))
-    return m ? decodeURIComponent(m[1]) : null
+    if (!m) return null
+    try {
+      return decodeURIComponent(m[1])
+    } catch (e) {
+      return m[1]
+    }
   }
 
   function writeCookie(name, value, days) {
     var exp = new Date(Date.now() + days * 86400000).toUTCString()
     document.cookie = name + '=' + encodeURIComponent(value) + '; expires=' + exp + '; path=/; SameSite=Lax'
+    cookiesUsable = readCookie(name) === String(value)
+    return cookiesUsable
   }
 
   function eraseCookie(name) {
@@ -1268,9 +1376,17 @@
   function parseSeriesCount(countName) {
     var raw = readCookie(countName) || ''
     var m = /^(\d+):(\d+)$/.exec(raw)
-    if (m) return { gen: parseInt(m[1], 10), count: parseInt(m[2], 10) }
-    var n = parseInt(raw, 10)
-    return { gen: 0, count: n > 0 ? n : 0 }
+    if (m) {
+      var gen = Number(m[1])
+      var count = Number(m[2])
+      return {
+        gen: Number.isSafeInteger(gen) ? gen : 0,
+        count: Number.isSafeInteger(count) && count >= 0 && count <= 24 ? count : 0,
+      }
+    }
+    if (!/^\\d+$/.test(raw)) return { gen: 0, count: 0 }
+    var n = Number(raw)
+    return { gen: 0, count: Number.isSafeInteger(n) && n > 0 && n <= 24 ? n : 0 }
   }
 
   function chunkName(prefix, gen, i) {
@@ -1292,14 +1408,41 @@
     var chunks = []
     for (var p = 0; p < b64.length; p += COOKIE_CHUNK) chunks.push(b64.slice(p, p + COOKIE_CHUNK))
     if (b64.length && chunks.length > maxChunks) return false
+    if (!b64.length) {
+      // An empty payload is a deliberate wipe, not a zero-chunk save that a
+      // reader would then treat as corrupt.
+      clearSeries(prefix, countName)
+      return true
+    }
     var prev = parseSeriesCount(countName)
-    var gen = prev.gen + 1
-    chunks.forEach(function (c, idx) {
-      writeCookie(chunkName(prefix, gen, idx), c, COOKIE_DAYS)
+    var gen = prev.gen >= Number.MAX_SAFE_INTEGER ? 1 : prev.gen + 1
+    for (var idx = 0; idx < chunks.length; idx++) {
+      if (!writeCookie(chunkName(prefix, gen, idx), chunks[idx], COOKIE_DAYS)) {
+        for (var cleanup = 0; cleanup < maxChunks; cleanup++) eraseCookie(chunkName(prefix, gen, cleanup))
+        return false
+      }
+    }
+    // A killed earlier save may have left extra chunks for this generation.
+    // Clear unused indices before publishing it, or stale chunks keep riding
+    // every request even though the count no longer references them.
+    for (var stale = chunks.length; stale < maxChunks; stale++) eraseCookie(chunkName(prefix, gen, stale))
+    if (!writeCookie(countName, gen + ':' + chunks.length, COOKIE_DAYS)) {
+      for (var cleanup = 0; cleanup < maxChunks; cleanup++) eraseCookie(chunkName(prefix, gen, cleanup))
+      return false
+    }
+    // Only now is the previous generation dead weight. Prune abandoned writes
+    // too, so interrupted generations cannot grow the request header forever.
+    var active = {}
+    for (var keep = 0; keep < chunks.length; keep++) active[chunkName(prefix, gen, keep)] = true
+    var prefixWithSeparator = prefix + '_'
+    document.cookie.split(';').forEach(function (entry) {
+      var name = entry.trim().split('=')[0]
+      if (name.indexOf(prefixWithSeparator) !== 0) return
+      var parts = name.slice(prefixWithSeparator.length).split('_')
+      var isChunk = parts.length === 1 ? /^\d+$/.test(parts[0]) :
+        parts.length === 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])
+      if (isChunk && !active[name]) eraseCookie(name)
     })
-    writeCookie(countName, gen + ':' + chunks.length, COOKIE_DAYS)
-    // Only now is the previous generation dead weight.
-    for (var i = 0; i < prev.count; i++) eraseCookie(chunkName(prefix, prev.gen, i))
     eraseCookie(prefix)
     return true
   }
@@ -1329,8 +1472,13 @@
   }
 
   function clearSeries(prefix, countName) {
-    var prev = parseSeriesCount(countName)
-    for (var i = 0; i < prev.count; i++) eraseCookie(chunkName(prefix, prev.gen, i))
+    // The counter may be missing or damaged. Enumerate the actual cookie jar
+    // too, otherwise orphaned chunks can keep contributing to every header.
+    var withSeparator = prefix + '_'
+    document.cookie.split(';').forEach(function (entry) {
+      var name = entry.trim().split('=')[0]
+      if (name === prefix || name.indexOf(withSeparator) === 0) eraseCookie(name)
+    })
     eraseCookie(prefix)
     eraseCookie(countName)
   }
@@ -1356,7 +1504,6 @@
     var found = []
     DEAD_SERIES.forEach(function (prefix) {
       var countName = prefix + '_n'
-      if (!seriesPresent(countName) && !seriesPresent(prefix)) return
       var value = loadBlobFromCookies(prefix, countName)
       if (value) found.push({ prefix: prefix, value: value })
       clearSeries(prefix, countName)
@@ -1364,8 +1511,11 @@
     if (!found.length) return s
     // The background series was the only one that ever shipped, so the first
     // picture found belongs to the background.
-    if (s.background && !s.background.image) s.background.image = found[0].value
-    if (found[1] && s.logo && !s.logo.image) s.logo.image = found[1].value
+    for (var i = 0; i < found.length; i++) {
+      var recovered = cleanDataUrl(found[i].value)
+      if (found[i].prefix === 'fbts_img' && s.background && !s.background.image) s.background.image = recovered
+      if (found[i].prefix === 'fbts_logo' && s.logo && !s.logo.image) s.logo.image = recovered
+    }
     return s
   }
 
@@ -1473,6 +1623,14 @@
     // note that nothing is written over it until the user changes something.
     if (seriesPresent(COOKIE_COUNT)) {
       notifySave('Your saved theme could not be read - nothing was overwritten')
+      // The cookies still hold a theme; only a chunk is missing. Do not write
+      // the cache or the default over it, or the unreadable theme is gone for
+      // good. The flags stay off until the user changes something.
+      if (cached) return settleState(withSessionPictures(normalizeState(cached)))
+      if (window.__FREEBUFF_THEME_DEFAULT__) {
+        return settleState(withCachedPictures(normalizeState(unwrapTheme(window.__FREEBUFF_THEME_DEFAULT__)), null))
+      }
+      return clone(DEFAULT_STATE)
     }
     if (cached) {
       var parsed = settleState(withSessionPictures(normalizeState(cached)))
@@ -1535,6 +1693,11 @@
    */
   var stateDirty = false
   var pictureNoticeShown = false
+  // Optimistically attempt the write; unrelated app cookies do not prove that
+  // this extension's own cookie can be stored.
+  var cookiesUsable = true
+  var storageNoticeShown = false
+  var rawNoticeShown = false
 
   /** Say something about a save that could not keep everything. Before the UI
    *  exists the message waits for it instead of being dropped. */
@@ -1575,22 +1738,53 @@
 
     // localStorage is a same-session cache only - the app takes a fresh port on
     // every launch, so its origin (and this value) does not survive a restart.
+    // It has a much larger budget than the cookies do, so the raw CSS box stays
+    // in it: only the cookie copy has to fit the header budget.
+    var cacheState = clone(s)
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(s))
+      localStorage.setItem(LS_KEY, JSON.stringify(cacheState))
     } catch (e) {
+      var withoutImages = clone(cacheState)
+      withoutImages.raw = ''
+      if (withoutImages.background) withoutImages.background.image = ''
+      if (withoutImages.logo) withoutImages.logo.image = ''
       try {
-        localStorage.setItem(LS_KEY, JSON.stringify(cookiePayload(s)))
-      } catch (e2) {}
+        localStorage.setItem(LS_KEY, JSON.stringify(withoutImages))
+      } catch (e2) {
+        try {
+          localStorage.setItem(LS_KEY, JSON.stringify(cookiePayload(withoutImages)))
+        } catch (e3) {}
+      }
     }
 
-    var ok = saveToCookies(JSON.stringify(cookiePayload(s)))
+    var cookieState = cookiePayload(cacheState)
+    var rawDropped = false
+    if (cookieState.raw.length > COOKIE_MAX_RAW) {
+      cookieState.raw = ''
+      rawDropped = true
+    }
+    var ok = cookiesUsable && saveToCookies(JSON.stringify(cookieState))
+    if (ok && rawDropped && !rawNoticeShown) {
+      rawNoticeShown = true
+      notifySave('Custom CSS kept for this session only - it is too long to store between launches')
+    }
+    if (!ok && !cookiesUsable) {
+      // Electron can be configured to block cookies. Do not report a successful
+      // durable save: keep the in-session copy and tell the user it will not
+      // survive a full restart.
+      if (!storageNoticeShown) {
+        storageNoticeShown = true
+        notifySave('Cookies are disabled - your theme may not survive a restart')
+      }
+      return false
+    }
     if (!ok) {
       // One oversized field - the raw CSS box, usually - must not cost the
       // colours and the layout along with it.
-      var bare = cookiePayload(s)
+      var bare = cookiePayload(cacheState)
       bare.raw = ''
       ok = saveToCookies(JSON.stringify(bare))
-      if (ok) notifySave('Saved without the custom CSS - it is too long to remember')
+      if (ok) notifySave('Saved without the custom CSS - Freebuff cannot carry that much CSS between launches')
     }
 
     if (!ok) {
@@ -1630,6 +1824,32 @@
 
   var state = loadState()
   var applied = { colors: {}, layout: {} }
+  // The app's own data-theme value, captured before the theme ever touched it.
+  var appDataTheme = null
+  // What the theme wants the app's appearance attribute to say right now.
+  var wantedDataTheme = null
+
+  /**
+   * Keep the app's own appearance attribute in step with the theme.
+   * React rewrites it on a re-render (it is driven by the user's setting), so
+   * it is re-asserted here rather than only at apply time.
+   */
+  function enforceAppThemeAttribute() {
+    if (wantedDataTheme === null || !document.documentElement.dataset) return
+    if (document.documentElement.dataset.theme !== wantedDataTheme) {
+      document.documentElement.dataset.theme = wantedDataTheme
+    }
+  }
+
+  function watchAppThemeAttribute() {
+    if (typeof MutationObserver !== 'function') return
+    try {
+      new MutationObserver(enforceAppThemeAttribute).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-theme'],
+      })
+    } catch (e) {}
+  }
 
   function setVar(name, value) {
     document.documentElement.style.setProperty(name, value)
@@ -1706,8 +1926,8 @@
     }
     var rgbMatch = /rgba?\(([^)]+)\)/.exec(s)
     if (rgbMatch) {
-      var parts = rgbMatch[1].split(/[\s,/]+/).filter(Boolean).slice(0, 3)
-      if (parts.length === 3) return rgbToHex(parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2]))
+      var parsedRgb = parseColor(rgbMatch[0])
+      if (parsedRgb) return parsedRgb.hex
     }
     return ''
   }
@@ -1752,14 +1972,32 @@
       if (next[name] && typeof next[name] === 'object') applied.colors[name] = true
       else applied.layout[name] = true
     }
-    // color-scheme: preset appearance, unless the user forced one
-    if (state.scheme === 'light' || state.scheme === 'dark') {
-      document.documentElement.style.setProperty('color-scheme', state.scheme)
+    /*
+     * The app's own appearance setting, not just ours.
+     *
+     * `color-scheme` alone was not enough: Freebuff picks its light palette with
+     * `:root[data-theme=light]`, and those rules redeclare tokens on the
+     * elements that use them, so a dark theme applied while the app was set to
+     * light left the settings page, modals and the Theme Studio page itself on
+     * the light palette. The theme's scheme is therefore mirrored onto the
+     * app's own attribute, and the app's value is remembered so resetting the
+     * theme hands it back untouched.
+     */
+    // The stock preset deliberately has no opinion, so an app set to light is
+    // left light; only a real preset or an explicit choice picks a scheme.
+    var followAppearance = !state.settings || state.settings.followThemeAppearance !== false
+    var schemePreset = state.preset !== 'default' ? PRESET_BY_ID[state.preset] : null
+    var scheme = followAppearance ? state.scheme || (schemePreset && schemePreset.scheme) || '' : ''
+    var root = document.documentElement
+    if (appDataTheme === null) appDataTheme = root.dataset ? root.dataset.theme || '' : ''
+    if (scheme === 'light' || scheme === 'dark') {
+      root.style.setProperty('color-scheme', scheme)
+      wantedDataTheme = scheme
     } else {
-      var preset2 = state.preset !== 'default' ? PRESET_BY_ID[state.preset] : null
-      if (preset2 && preset2.scheme) document.documentElement.style.setProperty('color-scheme', preset2.scheme)
-      else document.documentElement.style.removeProperty('color-scheme')
+      root.style.removeProperty('color-scheme')
+      wantedDataTheme = appDataTheme || null
     }
+    enforceAppThemeAttribute()
     /*
      * Floors for the editor's own boxes. NOT declared in the shadow stylesheet,
      * because a declaration on :host would shadow these inherited ones - the
@@ -1843,13 +2081,109 @@
     '--shell-header-divider': '.desktop-shell, .project-sidebar',
   }
 
+  /*
+   * Tokens the app declares on something other than :root.
+   *
+   * Freebuff ships a light and a dark palette, and the light one is selected by
+   * `:root[data-theme=light]` (the app sets that attribute from the user's own
+   * appearance setting). On top of that, the app redeclares a large number of
+   * tokens on the element that *uses* them - `:is(.settings-page,.modal)`,
+   * `.project-sidebar`, `.modal`, `.ad-showcase`, `.catalog`, and so on - and a
+   * declaration on the element that uses a token beats one inherited from
+   * <html>, however the inline style was set.
+   *
+   * So a theme could be applied perfectly on <html> and still leave whole
+   * regions - the settings page, the Theme Studio page itself, modals, the
+   * project sidebar - wearing the app's own light palette. That is the "old
+   * theme looks half-applied / panels do not match" report, and no amount of
+   * sanitising a stored theme would have fixed it.
+   *
+   * The list is therefore not hard-coded: when the engine boots it reads the
+   * app's own stylesheets (same origin, so their rules are readable) and builds
+   * a map of token -> the selectors that declare it outside :root. Every token
+   * a theme actually overrides is then re-declared on those exact selectors
+   * with !important, which outranks the app's own declaration because the app
+   * never uses !important for a custom property (measured: 0 of 408).
+   */
+  var discoveredTargets = null
+
+  function discoverTokenTargets() {
+    if (discoveredTargets) return discoveredTargets
+    var map = {}
+    var found = 0
+
+    function add(prop, selector) {
+      var list = map[prop]
+      if (!list) list = map[prop] = []
+      if (list.indexOf(selector) === -1 && list.length < 24) {
+        list.push(selector)
+        found++
+      }
+    }
+
+    function walk(rules, owner) {
+      for (var i = 0; i < rules.length; i++) {
+        var rule = rules[i]
+        // @media / @supports / @layer: the inner rules carry the declarations.
+        if (rule.cssRules && rule.cssRules.length) {
+          walk(rule.cssRules, owner)
+          continue
+        }
+        var selector = rule.selectorText
+        var style = rule.style
+        if (!selector || !style || !style.length) continue
+        // A :root/html declaration is already beaten by the inline style.
+        if (/^(?::root|html|:where\(:root\))\s*$/i.test(selector.trim())) continue
+        for (var j = 0; j < style.length; j++) {
+          var prop = style[j]
+          if (typeof prop === 'string' && prop.slice(0, 2) === '--') add(prop.toLowerCase(), selector)
+        }
+      }
+    }
+
+    for (var s = 0; s < document.styleSheets.length; s++) {
+      var sheet = document.styleSheets[s]
+      var rules = null
+      try {
+        rules = sheet.cssRules
+      } catch (e) {
+        // A cross-origin sheet cannot be read; it is not one of ours.
+        continue
+      }
+      if (!rules) continue
+      // Never learn targets from the stylesheets this engine wrote itself.
+      var owner = sheet.ownerNode
+      if (owner && (owner.id === PAGE_STYLE_ID || owner.id === RAW_STYLE_ID)) continue
+      try {
+        walk(rules, owner)
+      } catch (e) {}
+    }
+
+    // Only trust the map once the app's stylesheet is actually there. Before
+    // that an empty map would be cached and every token would fall back to the
+    // static list for the rest of the session.
+    if (found > 0 || document.readyState === 'complete') discoveredTargets = map
+    return map
+  }
+
   var LOGO_IMG_SELECTOR = '.new-thread-logo, .splash-logo, .loading-screen-logo, .empty-space-logo'
   // An inline SVG has no image to swap: paint a background behind it and hide
   // its own shapes.
   var LOGO_BOX_SELECTOR = '.project-sidebar-wordmark'
 
   function cssEscapeUrl(url) {
-    return 'url("' + String(url).replace(/["\\\n\r]/g, '') + '")'
+    // Keep the complete data URL. Removing quotes (the old implementation)
+    // silently corrupted ordinary inline SVGs; escaping them is both safer and
+    // preserves the image bytes.
+    var escaped = String(url).replace(/[\\"\n\r\f\0]/g, function (ch) {
+      if (ch === '\\') return '\\\\'
+      if (ch === '"') return '\\"'
+      if (ch === '\n') return '\\a '
+      if (ch === '\r') return '\\d '
+      if (ch === '\f') return '\\c '
+      return '\ufffd'
+    })
+    return 'url("' + escaped + '")'
   }
 
   function hexToRgbParts(hex) {
@@ -1863,9 +2197,18 @@
     var lines = []
     var k
 
+    var discovered = discoverTokenTargets()
     var byTarget = {}
     for (k in values) {
-      var target = SHELL_TARGETS[k]
+      var staticTarget = SHELL_TARGETS[k]
+      var extra = discovered[k]
+      var target = ''
+      if (staticTarget) target = staticTarget
+      if (extra && extra.length) {
+        var extraText = extra.join(', ')
+        // Merge without repeating selectors already in the static list.
+        target = target ? target + ', ' + extraText : extraText
+      }
       var value = safeCss(values[k])
       if (!target || !value) continue
       if (!byTarget[target]) byTarget[target] = []
@@ -1927,7 +2270,9 @@
       var baseToken = bg.whole ? '--bg' : '--workspace-surface'
       var base = values[baseToken] || values['--bg'] || '#000000'
       var dimAmount = bg.dim || 0
-      var parts = hexToRgbParts(base)
+      // Theme colours may be translucent or gradients. Use their opaque base
+      // instead of silently treating rgba()/linear-gradient as black.
+      var parts = hexToRgbParts(opaqueHex(base) || '#000000')
       // Dim pulls the veil towards black; opacity lets the surface show
       // through. Both end up in one rgba, because a background layer can only
       // be faded as a whole.
@@ -1970,12 +2315,9 @@
 
   function resetAll() {
     state = clone(DEFAULT_STATE)
-    var name
-    for (name in applied.colors) unsetVar(name)
-    for (name in applied.layout) unsetVar(name)
-    applied = { colors: {}, layout: {} }
-    document.documentElement.style.removeProperty('color-scheme')
-    applyRaw()
+    // Recompute every layer, not just :root. This also removes window-button,
+    // shell geometry and background-picture rules left by the page stylesheet.
+    applyState()
     saveState(state, true)
   }
 
@@ -2452,6 +2794,10 @@
 .fbts-textarea.drop { border-color: var(--fbts-accent); background: color-mix(in srgb, var(--fbts-accent) 12%, var(--fbts-panel)); }
 .fbts-code-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .fbts-code-row input { flex: 1; min-width: 0; margin: 0; font-family: var(--fbts-mono); font-size: 11px; }
+.fbts-code { display: block; background: var(--fbts-panel); border: 1px solid var(--fbts-line); border-radius: 4px; padding: 7px 9px; font-family: var(--fbts-mono); font-size: 11px; color: var(--fbts-ink); white-space: pre-wrap; word-break: break-all; box-shadow: var(--fbts-sunken); }
+/* ---- settings rows ---- */
+.fbts-setting { margin: 0 0 10px; }
+.fbts-setting + .fbts-setting { border-top: 1px solid var(--fbts-line); padding-top: 10px; }
 .fbts-search { width: 100%; background: var(--fbts-panel); border: 1px solid var(--fbts-line); border-radius: 4px; color: var(--fbts-ink); padding: 7px 9px; font-size: 11.5px; outline: none; margin-bottom: 8px; box-shadow: var(--fbts-sunken); }
 .fbts-search:focus { border-color: var(--fbts-accent); }
 .fbts-toast {
@@ -2704,6 +3050,13 @@
       } catch (e) {}
     }
 
+    /** The release list, which is also where the installer is downloaded from. */
+    function openReleasesPage() {
+      try {
+        window.open('https://github.com/RichardFlp/freebuff-ui/releases', '_blank', 'noopener')
+      } catch (e) {}
+    }
+
     function showUpdatePopup() {
       if (!remoteVersion) return
       modalBody.textContent = ''
@@ -2754,6 +3107,7 @@
     }
 
     function isNewer(a, b) {
+      if (!/^\d+(?:\.\d+){1,3}$/.test(String(a)) || !/^\d+(?:\.\d+){1,3}$/.test(String(b))) return false
       var pa = String(a).split('.')
       var pb = String(b).split('.')
       if (pa.length < 2) return false
@@ -2766,7 +3120,8 @@
     }
 
     var cleanVersion = function (v) {
-      return String(v == null ? '' : v).replace(/["'\s]/g, '')
+      var value = String(v == null ? '' : v).replace(/["'\s]/g, '')
+      return /^\d+(?:\.\d+){1,3}$/.test(value) ? value : ''
     }
 
     /**
@@ -2775,14 +3130,14 @@
      * even cross-origin, and a missing or blocked feed just means silence.
      */
     /** Ask one host for the feed. Calls back with the version, or '' if it could not. */
-    function probeHost(host, done) {
+    function probeHost(url, done) {
       var link = document.createElement('link')
       link.rel = 'stylesheet'
       // jsDelivr ignores query strings for its own cache, so this parameter is
       // here to keep the *browser* honest: it would otherwise keep this file
       // for a week. A per-hour address caps browser staleness at an hour, while
       // the CDN's own entry is purged as part of publishing a release.
-      link.href = host + FEED_PATH + '?h=' + new Date().toISOString().slice(0, 13)
+      link.href = url + '?h=' + new Date().toISOString().slice(0, 13)
       var settled = false
 
       function finish(version) {
@@ -2795,6 +3150,10 @@
       link.addEventListener('load', function () {
         var value = ''
         try {
+          // Stylesheets from multiple edges declare the same property. Move
+          // this loaded sheet to the end so the computed value belongs to this
+          // host, not whichever CDN link happens to win the cascade.
+          document.head.appendChild(link)
           value = getComputedStyle(document.documentElement).getPropertyValue(REMOTE_VERSION_VAR)
         } catch (e) {}
         finish(cleanVersion(value))
@@ -2809,30 +3168,22 @@
       document.head.appendChild(link)
     }
 
+    function autoUpdateOn() {
+      return !state.settings || state.settings.autoUpdate !== false
+    }
+
     function checkForUpdates(manual) {
       if (checking || !document.head) return
+      if (!manual && !autoUpdateOn()) return
       var last = parseInt(readCookie(CHECK_COOKIE) || '0', 10)
       if (!manual && Date.now() - last < CHECK_INTERVAL) return
       checking = true
       updateStatus = 'checking'
       if (manual) showToast('Checking for updates\u2026')
 
-      var index = 0
+      var remaining = FEED_URLS.length
+      var newest = ''
       document.documentElement.setAttribute(UPDATE_PROBE, '')
-
-      function tryNext() {
-        if (index >= FEED_HOSTS.length) {
-          checking = false
-          updateStatus = 'failed'
-          document.documentElement.removeAttribute(UPDATE_PROBE)
-          if (manual) showToast('Could not check for updates')
-          return
-        }
-        probeHost(FEED_HOSTS[index++], function (version) {
-          if (!version) return tryNext()
-          finish(version)
-        })
-      }
 
       function finish(version) {
         if (!checking) return
@@ -2840,6 +3191,7 @@
         updateStatus = 'ok'
         document.documentElement.removeAttribute(UPDATE_PROBE)
         writeCookie(CHECK_COOKIE, String(Date.now()), 365)
+        var previouslySeen = readCookie(CHECK_SEEN_COOKIE)
         writeCookie(CHECK_SEEN_COOKIE, version, 365)
         if (!isNewer(version, VERSION)) {
           if (manual) showToast('You are on the latest version')
@@ -2847,6 +3199,11 @@
           return
         }
         remoteVersion = version
+        // Don't reopen a dismissed notice every hourly background poll.
+        if (!manual && previouslySeen === version) {
+          showChip(version)
+          return
+        }
         // A skipped version stays skipped: it only leaves the corner button.
         if (!manual && readCookie(SKIP_COOKIE) === version) {
           showChip(version)
@@ -2855,7 +3212,21 @@
         showUpdatePopup()
       }
 
-      tryNext()
+      FEED_URLS.forEach(function (url) {
+        probeHost(url, function (version) {
+          if (version && (!newest || isNewer(version, newest))) newest = version
+          if (--remaining === 0) {
+            if (newest) finish(newest)
+            else {
+              checking = false
+              updateStatus = 'failed'
+              document.documentElement.removeAttribute(UPDATE_PROBE)
+              if (manual) showToast('Could not check for updates')
+              refreshVersionLabel()
+            }
+          }
+        })
+      })
     }
 
     var picker = colorPicker()
@@ -2903,7 +3274,7 @@
         ]),
       ]),
       el('div', { class: 'grow' }),
-      el('button', { class: 'fbts-x', title: 'Close', text: '\u00d7', onclick: function () { panel.classList.remove('open') } }),
+      el('button', { class: 'fbts-x', title: 'Close', text: '\u00d7',        onclick: function () { togglePage(false) } }),
     ])
 
     /* ---- tabs ---- */
@@ -2915,27 +3286,51 @@
       ['page', 'Logo and background'],
       ['advanced', 'Advanced'],
       ['io', 'Export'],
+      ['settings', 'Settings'],
     ]
     var tabsBar = el('div', { class: 'fbts-tabs' })
     var body = el('div', { class: 'fbts-body' })
     var tabPanes = {}
+    tabsBar.setAttribute('role', 'tablist')
 
     TAB_DEFS.forEach(function (def) {
-      var tab = el('div', { class: 'fbts-tab', text: def[1], onclick: function () { selectTab(def[0]) } })
+      var tab = el('button', { class: 'fbts-tab', type: 'button', role: 'tab', text: def[1], onclick: function () { selectTab(def[0]) } })
       tab.dataset.tab = def[0]
+      tab.id = 'fbts-tab-' + def[0]
       tabsBar.appendChild(tab)
     })
 
     function selectTab(id) {
+      if (!tabPanes[id]) return
       Array.prototype.forEach.call(tabsBar.children, function (c) {
-        c.classList.toggle('active', c.dataset.tab === id)
+        var selected = c.dataset.tab === id
+        c.classList.toggle('active', selected)
+        c.setAttribute('aria-selected', selected ? 'true' : 'false')
+        c.tabIndex = selected ? 0 : -1
+        // The strip scrolls once there are more tabs than fit; keep the one in
+        // use on screen, and never scroll the page while doing it.
+        if (selected) {
+          try {
+            c.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+          } catch (e) {}
+        }
       })
-      for (var k in tabPanes) tabPanes[k].style.display = k === id ? '' : 'none'
+      for (var k in tabPanes) {
+        var visible = k === id
+        tabPanes[k].style.display = visible ? '' : 'none'
+        tabPanes[k].hidden = !visible
+      }
     }
 
     function pane(id) {
       var p = el('div')
       p.dataset.pane = id
+      p.setAttribute('role', 'tabpanel')
+      var tab = tabsBar.querySelector('[data-tab="' + id + '"]')
+      if (tab) {
+        p.setAttribute('aria-labelledby', tab.id || (tab.id = 'fbts-tab-' + id))
+        tab.setAttribute('aria-controls', p.id || (p.id = 'fbts-pane-' + id))
+      }
       tabPanes[id] = p
       body.appendChild(p)
       return p
@@ -3268,8 +3663,14 @@
       })
       resetBtn.addEventListener('click', function () {
         if (!target) return
+        if (!target.tokens.length && typeof target.onReset === 'function') {
+          target.onReset()
+          close()
+          return
+        }
         target.tokens.forEach(function (t) {
           delete state.colors[t]
+          delete state.layout[t]
           delete state.gradients[t]
         })
         applyState()
@@ -3338,6 +3739,8 @@
         applyState()
         saveState(state)
         render()
+        // A dial retunes the whole palette, so the spots and swatches follow.
+        refreshSpots()
       }
 
       var lastY = 0
@@ -3389,10 +3792,20 @@
     }
 
     /* ---- persistence helpers ---- */
+    /*
+     * One committed change, then redraw everything that shows the theme.
+     *
+     * refreshSpots() used to be left out, and every change that went through
+     * here - a preset, a scheme switch, a radius, a hex typed into the Colors
+     * tab - left the colour spots painted with the previous theme's colours
+     * until something else happened to redraw them. That is the reported
+     * "quick colours do not change after I choose a template".
+     */
     function commit(message) {
       applyState()
       saveState(state)
       refreshActive()
+      refreshSpots()
       if (message) showToast(message)
     }
 
@@ -3400,12 +3813,15 @@
       if (value == null || value === '') {
         delete state.colors[token]
         delete state.layout[token]
+        delete state.gradients[token]
       } else if (typeof value === 'object') {
         state.colors[token] = value
         delete state.layout[token]
+        delete state.gradients[token]
       } else {
         state.layout[token] = value
         delete state.colors[token]
+        delete state.gradients[token]
       }
       commit()
     }
@@ -3433,10 +3849,22 @@
         for (var i = 0; i < s.tokens.length; i++) if (state.colors[s.tokens[i]] || state.gradients[s.tokens[i]]) changed = true
         s.node.classList.toggle('overridden', changed)
       })
-      // Keep the Colors tab swatches in step with the picker.
-      Array.prototype.forEach.call(shadow.querySelectorAll('.fbts-swatchinput'), function (sw) {
-        var row = sw.closest('[data-token]')
-        if (row) sw.style.background = fillFor(row.dataset.token)
+      /*
+       * Keep the Colors tab in step too: swatch, hex and alpha. A row that
+       * has focus is somebody mid-edit, so it keeps what they are typing.
+       * Rows with no swatch are the layout rows - a text value, not a colour -
+       * and are left alone.
+       */
+      Array.prototype.forEach.call(shadow.querySelectorAll('[data-token]'), function (row) {
+        var sw = row.querySelector('.fbts-swatchinput')
+        if (!sw) return
+        var token = row.dataset.token
+        sw.style.background = fillFor(token)
+        var c = currentColorFor(token)
+        var txt = row.querySelector('input[type=text]')
+        if (txt && txt !== shadow.activeElement) txt.value = c.hex
+        var alpha = row.querySelector('input[type=range]')
+        if (alpha && alpha !== shadow.activeElement) alpha.value = String(Math.round(c.a * 100))
       })
     }
 
@@ -3513,7 +3941,17 @@
       var current = state.layout[token] || ''
       var input = el('input', {
         class: 'fbts-textinput', type: 'text', value: current, placeholder: 'app default', spellcheck: 'false',
-        oninput: function () { setOverride(token, input.value.trim() || null) },
+        oninput: function () {
+          var value = input.value.trim()
+          var safe = value ? sanitizeLayoutValue(token, value) : ''
+          if (value && !safe) {
+            input.setCustomValidity('Use a plain CSS value for this token (no rules, URLs, braces or !important).')
+            input.reportValidity()
+            return
+          }
+          input.setCustomValidity('')
+          setOverride(token, safe || null)
+        },
       })
       var reset = el('button', {
         class: 'fbts-mini', title: 'Reset', text: '\u21ba',
@@ -3544,7 +3982,19 @@
           onclick: function () {
             state.preset = p.id
             state.colors = {}
-            commit('Applied ' + p.label)
+            // A solid preset must not inherit gradients from the previous theme.
+            state.gradients = {}
+            applyState()
+            saveState(state, true)
+            // The Community tab keeps its own highlight; a preset is not that
+            // theme any more. Cleared first, so the rebuild below repaints
+            // both highlights from the same state.
+            communityActiveId = ''
+            // A preset swaps the whole theme, so every row and spot is reseeded
+            // from it - commit() alone left them showing the previous theme.
+            rebuild()
+            renderCommunity()
+            showToast('Applied ' + p.label)
           },
         },
         [el('div', { class: 'fbts-thumb', style: thumbStyle(p) }, thumbParts()), el('div', { class: 'fbts-preset-name', text: p.label })],
@@ -3683,10 +4133,10 @@
       }),
     )
 
-    /* Options: the app's own light/dark preference. */
+    /* The light/dark preference controls live on the Settings tab now. */
     var schemeRow = el('div')
     ;[
-      ['auto', 'Auto - follow the system'],
+      ['auto', 'Match the preset'],
       ['dark', 'Dark mode'],
       ['light', 'Light mode'],
     ].forEach(function (pair) {
@@ -3698,12 +4148,6 @@
       })
       schemeRow.appendChild(el('label', { class: 'fbts-option' }, [input, el('span', { text: pair[1] })]))
     })
-    presetsPane.appendChild(
-      group('Options', [
-        schemeRow,
-        el('div', { class: 'fbts-note', text: 'The look of native controls and scrollbars only. The palette above does not depend on it.' }),
-      ]),
-    )
 
     /* ---- Colors tab ---- */
     var colorsPane = pane('colors')
@@ -3851,24 +4295,45 @@
      */
     function readImageFile(file, kind, cb) {
       if (!file) return
+      if (!/^image\/(png|jpe?g|gif|webp|avif|svg\+xml)$/i.test(file.type || '')) {
+        showToast('Choose a PNG, JPG, GIF, WebP, AVIF or SVG image')
+        return
+      }
       if (file.size > 24 * 1024 * 1024) {
         showToast('That picture is over 24 MB - please resize it first')
         return
       }
-      // SVG is text, stays sharp at any size, and is usually tiny.
-      if (/^image\/svg\+xml/i.test(file.type)) {
+      var limit = IMAGE_KINDS[kind] || IMAGE_KINDS.background
+      /*
+       * A file that is small on disk can still be over budget once it is a
+       * data URL: base64 adds about a third, and a URL-encoded SVG can double.
+       * So the budget is checked on the encoded result, not the file size,
+       * and anything that lands over it goes through the same resize path as a
+       * big picture rather than being stored at any size.
+       */
+      var isSvg = /^image\/svg\+xml/i.test(file.type)
+      if (file.size <= limit.maxBytes || isSvg) {
         var reader = new FileReader()
-        reader.onload = function () { cb(cleanDataUrl(String(reader.result == null ? '' : reader.result))) }
+        reader.onload = function () {
+          var data = cleanDataUrl(String(reader.result == null ? '' : reader.result))
+          if (!data) {
+            showToast('That file is not a supported image')
+            return
+          }
+          if (!imageOverBudget(data, kind)) {
+            cb(data)
+            return
+          }
+          fitImage(data, kind, function (fitted) {
+            if (!fitted) {
+              showToast('That picture does not fit the theme size limit - try a smaller one')
+              return
+            }
+            cb(fitted)
+          })
+        }
         reader.onerror = function () { showToast('Could not read that file') }
         reader.readAsDataURL(file)
-        return
-      }
-      var limit = IMAGE_KINDS[kind] || IMAGE_KINDS.background
-      if (file.size <= limit.maxBytes) {
-        var small = new FileReader()
-        small.onload = function () { cb(cleanDataUrl(String(small.result == null ? '' : small.result))) }
-        small.onerror = function () { showToast('Could not read that file') }
-        small.readAsDataURL(file)
         return
       }
       var url = null
@@ -3886,9 +4351,6 @@
           showToast('Could not read that picture')
           return
         }
-        if (dataUrlBytes(fitted) > limit.maxBytes) {
-          showToast('That picture is heavy - it may not survive a restart')
-        }
         cb(fitted)
       })
     }
@@ -3896,7 +4358,7 @@
     function imagePicker(label, kind, onPick) {
       var input = el('input', {
         type: 'file', style: 'display:none',
-        accept: 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml',
+        accept: 'image/png,image/jpeg,image/gif,image/webp,image/avif,image/svg+xml',
       })
       input.addEventListener('change', function () {
         var f = input.files && input.files[0]
@@ -4134,6 +4596,12 @@
               state.window[key] = toCss({ hex: hexValue, a: a == null ? 1 : a })
               commit()
               renderWindowRows()
+            },
+            onReset: function () {
+              state.window[key] = ''
+              commit('Window buttons reset')
+              renderWindowRows()
+              showToast(labelText + ' follows the theme again')
             },
           },
           swatch,
@@ -4508,6 +4976,261 @@
       ]),
     )
 
+    /* ---- Settings tab ---- */
+    var settingsPane = pane('settings')
+    // Assigned below; refreshActive() runs after all panes exist, and guards
+    // on it in case a caller reaches it first.
+    var settingsRefresh = null
+
+    /** A labelled checkbox that reads and writes one value. */
+    function toggleRow(labelText, note, get, set) {
+      var input = el('input', { type: 'checkbox' })
+      input.checked = !!get()
+      input.addEventListener('change', function () { set(input.checked) })
+      var node = el('div', { class: 'fbts-setting' }, [
+        el('label', { class: 'fbts-option' }, [input, el('span', { text: labelText })]),
+        note ? el('div', { class: 'fbts-note', style: 'margin:2px 0 0 22px', text: note }) : null,
+      ])
+      return { node: node, render: function () { input.checked = !!get() } }
+    }
+
+    function settingsGroup(title, children) {
+      return group(title, children)
+    }
+
+    var followToggle = toggleRow(
+      'Let a theme switch Freebuff\u2019s light or dark appearance',
+      'On: a dark theme also puts Freebuff into dark, so no panel is left on the light palette. Off: Freebuff keeps the appearance you chose in its own settings.',
+      function () { return !state.settings || state.settings.followThemeAppearance !== false },
+      function (on) {
+        state.settings.followThemeAppearance = on
+        commit(on ? 'Themes may switch the app appearance' : 'Freebuff keeps its own appearance')
+      },
+    )
+
+    var autoUpdateToggle = toggleRow(
+      'Check for new versions automatically',
+      'One quiet check per hour, when the page is open. The button below always works.',
+      function () { return !state.settings || state.settings.autoUpdate !== false },
+      function (on) {
+        state.settings.autoUpdate = on
+        commit(on ? 'Automatic update checks on' : 'Automatic update checks off')
+      },
+    )
+
+    var storageReadout = el('div', { class: 'fbts-note', style: 'margin:0 0 8px' })
+    var updateReadout = el('div', { class: 'fbts-note', style: 'margin:0 0 8px' })
+    var skippedReadout = el('div', { class: 'fbts-note', style: 'margin:0 0 8px' })
+
+    function storageReport() {
+      var payload = JSON.stringify(cookiePayload(state))
+      var encoded = toBase64Url(payload)
+      var chunks = encoded.length ? Math.ceil(encoded.length / COOKIE_CHUNK) : 0
+      return {
+        payload: payload.length,
+        chunks: chunks,
+        fits: chunks <= COOKIE_MAX_THEME_CHUNKS,
+        maxChunks: COOKIE_MAX_THEME_CHUNKS,
+        raw: (state.raw || '').length,
+      }
+    }
+
+    function formatBytes(n) {
+      if (n < 1024) return n + ' B'
+      return (Math.round((n / 1024) * 10) / 10) + ' KB'
+    }
+
+    function lastCheckedText() {
+      var raw = parseInt(readCookie(CHECK_COOKIE) || '0', 10)
+      if (!raw) return 'Not checked yet on this profile.'
+      var mins = Math.round((Date.now() - raw) / 60000)
+      if (mins < 1) return 'Checked just now.'
+      if (mins < 60) return 'Checked ' + mins + ' minute' + (mins === 1 ? '' : 's') + ' ago.'
+      var hours = Math.round(mins / 60)
+      if (hours < 24) return 'Checked ' + hours + ' hour' + (hours === 1 ? '' : 's') + ' ago.'
+      return 'Checked ' + Math.round(hours / 24) + ' days ago.'
+    }
+
+    function renderSettings() {
+      followToggle.render()
+      autoUpdateToggle.render()
+      var rep = storageReport()
+      storageReadout.textContent =
+        'Theme: ' + formatBytes(rep.payload) + ' of at most ' + rep.maxChunks + ' x ' + formatBytes(COOKIE_CHUNK) +
+        ' (' + rep.chunks + ' of ' + rep.maxChunks + ' chunks used' + (rep.fits ? ')' : ' - too big, it will not be stored)') +
+        '. Custom CSS: ' + formatBytes(rep.raw) + ' of ' + formatBytes(COOKIE_MAX_RAW) + ' stored.'
+      updateReadout.textContent = 'You are on v' + VERSION + ' (installed engine). ' + lastCheckedText()
+      var skipped = readCookie(SKIP_COOKIE)
+      skippedReadout.textContent = skipped ? 'Version ' + skipped + ' is skipped.' : 'No version is being skipped.'
+    }
+    settingsRefresh = renderSettings
+
+    function eraseAllThemeCookies() {
+      var names = []
+      document.cookie.split(';').forEach(function (entry) {
+        var name = entry.trim().split('=')[0]
+        if (name && name.indexOf('fbts') === 0) names.push(name)
+      })
+      names.forEach(eraseCookie)
+      return names.length
+    }
+
+    /**
+     * Everything this page is allowed to delete.
+     *
+     * The panel, its engine and its data file live in Freebuff's install
+     * folder, and a web page cannot delete files there - that is the browser
+     * sandbox doing its job, not an oversight. So the button below erases every
+     * trace this page wrote (theme cookies, the session cache, the page
+     * stylesheet and the raw CSS tag) and then says exactly how to remove the
+     * three files, which the installer does with --uninstall.
+     */
+    function deleteThemeStudioData() {
+      var name
+      for (name in applied.colors) unsetVar(name)
+      for (name in applied.layout) unsetVar(name)
+      applied = { colors: {}, layout: {} }
+      state = clone(DEFAULT_STATE)
+      stateDirty = false
+      pending = null
+      if (saveTimer) {
+        clearTimeout(saveTimer)
+        saveTimer = null
+      }
+      var rawStyle = document.getElementById(RAW_STYLE_ID)
+      if (rawStyle) rawStyle.remove()
+      var pageStyle = document.getElementById(PAGE_STYLE_ID)
+      if (pageStyle) pageStyle.remove()
+      var cookies = eraseAllThemeCookies()
+      try {
+        localStorage.removeItem(LS_KEY)
+      } catch (e) {}
+      document.documentElement.style.removeProperty('color-scheme')
+      wantedDataTheme = appDataTheme || null
+      enforceAppThemeAttribute()
+      rebuild()
+      refreshKnobs()
+      renderSettings()
+      showDeleteDone(cookies)
+      return cookies
+    }
+
+    function showDeleteConfirm() {
+      modalBody.textContent = ''
+      modalBody.appendChild(el('h3', { text: 'Delete Theme Studio?' }))
+      modalBody.appendChild(
+        el('p', { text: 'This deletes your stored theme, the automatic-update settings, the session cache and every style this page has written into Freebuff. It cannot be undone, so save a .fbtheme first if you want to keep the theme.' }),
+      )
+      modalBody.appendChild(
+        el('p', { text: 'The panel itself is three files inside the Freebuff install folder. A web page is not allowed to delete those - that is the browser sandbox, and no theme editor can get around it - so finishing the job takes one run of the installer with --uninstall, which the next step explains.' }),
+      )
+      modalBody.appendChild(
+        el('div', { class: 'fbts-modal-foot' }, [
+          el('button', {
+            class: 'fbts-btn danger', type: 'button', text: 'Delete my theme and settings',
+            onclick: function () {
+              closePopup()
+              deleteThemeStudioData()
+            },
+          }),
+          el('button', { class: 'fbts-btn', type: 'button', text: 'Cancel', onclick: function () { closePopup() } }),
+        ]),
+      )
+      modalWrap.classList.add('show')
+    }
+
+    function showDeleteDone(cookieCount) {
+      modalBody.textContent = ''
+      modalBody.appendChild(el('h3', { text: 'Theme deleted' }))
+      modalBody.appendChild(
+        el('p', {}, [
+          'Removed ' + cookieCount + ' theme cookies, the session cache and every style this page had written. ',
+          'Freebuff is back to its own colours as soon as this page is reloaded.',
+        ]),
+      )
+      modalBody.appendChild(
+        el('p', { text: 'To remove the panel as well, run the installer you downloaded once more with --uninstall. It takes the panel, the engine and the community file out of the install folder and puts Freebuff\u2019s own index.html back.' }),
+      )
+      var command = el('code', { class: 'fbts-code', text: 'FreebuffThemeInjector.exe --uninstall' })
+      modalBody.appendChild(el('p', {}, [command]))
+      modalBody.appendChild(
+        el('div', { class: 'fbts-modal-foot' }, [
+          el('button', {
+            class: 'fbts-btn primary', type: 'button', text: 'Copy the command',
+            onclick: function () { copyText('FreebuffThemeInjector.exe --uninstall', 'Command copied') },
+          }),
+          el('button', { class: 'fbts-btn', type: 'button', text: 'Get the installer again', onclick: function () { openReleasesPage() } }),
+          el('button', { class: 'fbts-btn', type: 'button', text: 'Close', onclick: function () { closePopup() } }),
+        ]),
+      )
+      modalWrap.classList.add('show')
+    }
+
+    settingsPane.appendChild(
+      settingsGroup('Light and dark', [
+        schemeRow,
+        followToggle.node,
+        el('div', { class: 'fbts-note', text: 'The scheme controls Freebuff\u2019s own light or dark palette, which is what the settings page, dialogs and this panel inherit. The colours above are separate and stay whatever the theme says.' }),
+      ]),
+    )
+
+    settingsPane.appendChild(
+      settingsGroup('Updates', [
+        autoUpdateToggle.node,
+        updateReadout,
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          el('button', { class: 'fbts-btn', type: 'button', text: 'Check now', onclick: function () { checkForUpdates(true); setTimeout(renderSettings, 1500) } }),
+        ]),
+        skippedReadout,
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          el('button', {
+            class: 'fbts-btn', type: 'button', text: 'Forget skipped version',
+            onclick: function () {
+              eraseCookie(SKIP_COOKIE)
+              renderSettings()
+              showToast('Skipped version forgotten')
+            },
+          }),
+          headLink('What\u2019s new', 'Open the release list', function () { openReleasesPage() }),
+        ]),
+      ]),
+    )
+
+    settingsPane.appendChild(
+      settingsGroup('Storage', [
+        storageReadout,
+        el('div', { class: 'fbts-note', text: 'The theme is kept in Freebuff\u2019s own cookie store, which is the only place that survives a restart because the app takes a new port every launch. Background pictures and logos are session-only by design; export a theme file to keep one.' }),
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          el('button', {
+            class: 'fbts-btn', type: 'button', text: 'Save now',
+            onclick: function () {
+              var ok = saveStateNow(state, true)
+              renderSettings()
+              showToast(ok ? 'Theme saved' : 'Could not save the theme')
+            },
+          }),
+          el('button', {
+            class: 'fbts-btn', type: 'button', text: 'Forget the session cache',
+            onclick: function () {
+              try {
+                localStorage.removeItem(LS_KEY)
+              } catch (e) {}
+              showToast('Session cache cleared')
+            },
+          }),
+        ]),
+      ]),
+    )
+
+    settingsPane.appendChild(
+      settingsGroup('Delete', [
+        el('div', { class: 'fbts-note', style: 'color:var(--fbts-danger);margin:0 0 8px', text: 'Deleting removes your theme, the saved settings and every style this page wrote into Freebuff. The three files in the install folder are removed by the installer, because a web page cannot delete files.' }),
+        el('div', { class: 'fbts-actions', style: 'border:none;background:none;padding:0' }, [
+          el('button', { class: 'fbts-btn danger', type: 'button', text: 'Delete Theme Studio', onclick: showDeleteConfirm }),
+        ]),
+      ]),
+    )
+
     /*
      * Two slots, like the A/B switch on a plugin. Each holds a whole theme, and
      * every edit goes to whichever slot is showing, so a variant can be built
@@ -4571,6 +5294,24 @@
     document.addEventListener(
       'keydown',
       function (e) {
+        if (e.key === 'Tab' && panel.classList.contains('open')) {
+          var focusable = Array.prototype.filter.call(
+            panel.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex="0"]'),
+            function (item) { return item.getClientRects().length > 0 },
+          )
+          if (focusable.length) {
+            var first = focusable[0]
+            var last = focusable[focusable.length - 1]
+            var activeElement = shadow.activeElement
+            if (e.shiftKey && (activeElement === first || !panel.contains(activeElement))) {
+              e.preventDefault()
+              last.focus()
+            } else if (!e.shiftKey && (activeElement === last || !panel.contains(activeElement))) {
+              e.preventDefault()
+              first.focus()
+            }
+          }
+        }
         if (e.ctrlKey && e.altKey && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
           e.preventDefault()
           togglePage()
@@ -4612,6 +5353,10 @@
     }
 
     function readThemeFile(file) {
+      if (file.size > 12 * 1024 * 1024) {
+        showToast('That theme file is over 12 MB')
+        return
+      }
       var reader = new FileReader()
       reader.onload = function () {
         importThemeFromText(String(reader.result == null ? '' : reader.result))
@@ -4649,7 +5394,9 @@
     function refreshActive() {
       // preset cards
       Array.prototype.forEach.call(presetsGrid.children, function (card) {
-        card.classList.toggle('active', card.dataset.preset === state.preset)
+        // While a Community theme is the one applied, no stock preset is:
+        // the highlight belongs to the community card until you pick a preset.
+        card.classList.toggle('active', !communityActiveId && card.dataset.preset === state.preset)
       })
       // options
       Array.prototype.forEach.call(schemeRow.querySelectorAll('[data-scheme]'), function (input) {
@@ -4663,6 +5410,7 @@
       // The generated boxes only; the import box belongs to whoever is typing.
       exportArea.value = JSON.stringify(themeDocument(state), null, 2)
       shareInput.value = shareCode(state)
+      if (settingsRefresh) settingsRefresh()
       refreshVersionLabel()
     }
 
@@ -4750,12 +5498,20 @@
     try {
       var frameEl = document.querySelector('.workspace-frame') || document.querySelector('.settings-frame')
       new ResizeObserver(fitPage).observe(frameEl || document.documentElement)
-    } catch (e) {}
+    } catch (e) {}      selectTab('presets')
+      refreshSpots()
+      refreshKnobs()
+      refreshActive()
 
-    selectTab('presets')
-    refreshSpots()
-    refreshKnobs()
-    refreshActive()
+      // The first apply can run before every app stylesheet has arrived. Once
+      // the page has finished loading, re-read them so the token targets are
+      // complete, then re-apply the same theme against the fuller map.
+      watchAppThemeAttribute()
+      window.addEventListener('load', function () {
+        discoveredTargets = null
+        applyState()
+        enforceAppThemeAttribute()
+      })
 
     if (queuedNotice) {
       showToast(queuedNotice)

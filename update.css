@@ -1,9 +1,19 @@
 /*
  * Freebuff Theme Studio - update feed.
  *
- * The installed theme engine loads this file from
- * https://raw.githubusercontent.com/RichardFlp/freebuff-ui/main/update.css
- * once per session and compares the version below with its own.
+ * The installed theme engine loads this file once per session and compares the
+ * version below with its own, from:
+ *
+ *   https://cdn.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css
+ *   https://fastly.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css
+ *   https://gcore.jsdelivr.net/gh/RichardFlp/freebuff-ui@main/update.css
+ *   https://cdn.statically.io/gh/RichardFlp/freebuff-ui@main/update.css
+ *
+ * all four at once, taking the newest answer. The jsDelivr networks have been
+ * seen serving three different versions of this file at the same moment, so
+ * one stale edge must not be able to hide a release. raw.githubusercontent.com
+ * cannot be used at all: it serves CSS as text/plain with nosniff, and a
+ * browser refuses to apply such a stylesheet.
  *
  * Why a stylesheet: Freebuff's page CSP allows remote stylesheets but blocks
  * fetch() to anything outside 127.0.0.1 (connect-src), so this is the only
@@ -17,5 +27,5 @@
  */
 
 html[data-fbts-update-probe] {
-  --fbts-remote-version: "1.3.3";
+  --fbts-remote-version: "1.3.4";
 }

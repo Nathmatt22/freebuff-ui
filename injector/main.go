@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -43,7 +44,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.3.3"
+	version       = "1.3.4"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
@@ -239,6 +240,83 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
+// atomicWriteFile keeps a crash or failed write from leaving a truncated file.
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".fbts-*.tmp")
+	if err != nil {
+		return err
+	}
+	temp := f.Name()
+	defer os.Remove(temp)
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		return os.Rename(temp, path)
+	}
+	src, err := syscall.UTF16PtrFromString(temp)
+	if err != nil {
+		return err
+	}
+	dst, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	moveFileEx := syscall.NewLazyDLL("kernel32.dll").NewProc("MoveFileExW")
+	const moveFileReplaceExisting = 0x1
+	const moveFileWriteThrough = 0x8
+	result, _, callErr := moveFileEx.Call(uintptr(unsafe.Pointer(src)), uintptr(unsafe.Pointer(dst)), moveFileReplaceExisting|moveFileWriteThrough)
+	if result == 0 {
+		return fmt.Errorf("atomically replacing %s: %w", path, callErr)
+	}
+	return nil
+}
+
+// markerBounds rejects partial, duplicated and out-of-order injection markers.
+func markerBounds(html string) (int, int, bool, error) {
+	starts := strings.Count(html, markerStart)
+	ends := strings.Count(html, markerEnd)
+	if starts == 0 && ends == 0 {
+		return -1, -1, false, nil
+	}
+	if starts != 1 || ends != 1 {
+		return -1, -1, false, errors.New("index.html has duplicated or incomplete Theme Studio markers")
+	}
+	start := strings.Index(html, markerStart)
+	end := strings.Index(html, markerEnd)
+	if end < start+len(markerStart) {
+		return -1, -1, false, errors.New("index.html has out-of-order Theme Studio markers")
+	}
+	return start, end + len(markerEnd), true, nil
+}
+
+func stripInjected(html string) (string, bool, error) {
+	start, end, found, err := markerBounds(html)
+	if err != nil || !found {
+		return html, found, err
+	}
+	suffix := html[end:]
+	if strings.HasPrefix(suffix, "\r\n") {
+		suffix = suffix[2:]
+	} else if strings.HasPrefix(suffix, "\n") {
+		suffix = suffix[1:]
+	}
+	return html[:start] + suffix, true, nil
+}
+
 // ------------------------------------------------------------------ inject ---
 
 func scriptBlock(ui string) string {
@@ -274,27 +352,40 @@ func inject(ui string, quiet bool) error {
 		return errors.New("index.html does not look like the Freebuff UI; refusing to modify it")
 	}
 
-	// Back up the pristine file exactly once.
-	if _, err := os.Stat(backupPath(ui)); os.IsNotExist(err) {
-		// Only back up if it is not already injected.
-		if !strings.Contains(html, markerStart) {
-			if err := os.WriteFile(backupPath(ui), original, 0o644); err != nil {
+	start, end, alreadyInjected, err := markerBounds(html)
+	if err != nil {
+		return err
+	}
+
+	// Keep the pristine checksum stable across repeat installs. On a first
+	// install the backup is created only after all marker checks have passed.
+	pristine := original
+	if b, readErr := os.ReadFile(backupPath(ui)); readErr == nil {
+		pristine = b
+	} else if alreadyInjected {
+		stripped, _, err := stripInjected(html)
+		if err != nil {
+			return err
+		}
+		pristine = []byte(stripped)
+	}
+	if !alreadyInjected {
+		if _, statErr := os.Stat(backupPath(ui)); os.IsNotExist(statErr) {
+			if err := atomicWriteFile(backupPath(ui), original, 0o644); err != nil {
 				return fmt.Errorf("writing backup: %w", err)
 			}
 			if !quiet {
 				ok("Backed up original index.html")
 			}
+		} else if statErr != nil {
+			return fmt.Errorf("checking backup: %w", statErr)
 		}
 	}
 
 	block := scriptBlock(ui)
 	var updated string
-	if i := strings.Index(html, markerStart); i != -1 {
-		j := strings.Index(html, markerEnd)
-		if j == -1 {
-			return errors.New("index.html has a broken injection marker; restore the backup and retry")
-		}
-		updated = html[:i] + block + html[j+len(markerEnd):]
+	if alreadyInjected {
+		updated = html[:start] + block + html[end:]
 	} else if k := strings.LastIndex(html, "</body>"); k != -1 {
 		updated = html[:k] + block + "\n" + html[k:]
 	} else {
@@ -304,18 +395,19 @@ func inject(ui string, quiet bool) error {
 	if err := os.MkdirAll(assetsDir(ui), 0o755); err != nil {
 		return fmt.Errorf("creating assets dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(assetsDir(ui), engineName), engineJS, 0o644); err != nil {
+	if err := atomicWriteFile(filepath.Join(assetsDir(ui), engineName), engineJS, 0o644); err != nil {
 		return fmt.Errorf("writing engine: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(assetsDir(ui), communityName), communityJS, 0o644); err != nil {
+	if err := atomicWriteFile(filepath.Join(assetsDir(ui), communityName), communityJS, 0o644); err != nil {
 		return fmt.Errorf("writing community themes: %w", err)
 	}
-	if err := os.WriteFile(idx, []byte(updated), 0o644); err != nil {
-		return fmt.Errorf("writing index.html: %w", err)
-	}
-
-	if err := writeManifest(ui, original); err != nil {
+	// Write the recovery metadata before making the new index visible. A failed
+	// index replacement can then be retried or cleanly uninstalled.
+	if err := writeManifest(ui, pristine); err != nil {
 		return err
+	}
+	if err := atomicWriteFile(idx, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("writing index.html: %w", err)
 	}
 	return nil
 }
@@ -337,7 +429,7 @@ func writeManifest(ui string, original []byte) error {
 		BakedThemeSet: baked,
 	}
 	b, _ := json.MarshalIndent(m, "", "  ")
-	return os.WriteFile(manifestPath(ui), b, 0o644)
+	return atomicWriteFile(manifestPath(ui), b, 0o644)
 }
 
 func bakeTheme(ui, themeFile string) error {
@@ -345,9 +437,20 @@ func bakeTheme(ui, themeFile string) error {
 	if err != nil {
 		return err
 	}
+	if len(b) == 0 || len(b) > 12*1024*1024 {
+		return errors.New("theme file must be between 1 byte and 12 MB")
+	}
 	var probe map[string]any
 	if err := json.Unmarshal(b, &probe); err != nil {
-		return fmt.Errorf("theme file is not valid JSON: %w", err)
+		return fmt.Errorf("theme file must contain a JSON object: %w", err)
+	}
+	if probe == nil {
+		return errors.New("theme file must contain a JSON object")
+	}
+	if inner, wrapped := probe["theme"]; wrapped {
+		if _, ok := inner.(map[string]any); !ok {
+			return errors.New("theme envelope must contain a theme object")
+		}
 	}
 	// A .fbtheme document wraps the theme; bake the theme itself.
 	if inner, ok := probe["theme"].(map[string]any); ok {
@@ -360,7 +463,7 @@ func bakeTheme(ui, themeFile string) error {
 		}
 	}
 	body := "/* baked by FreebuffThemeInjector --theme */\nwindow.__FREEBUFF_THEME_DEFAULT__ = " + string(b) + ";\n"
-	return os.WriteFile(filepath.Join(assetsDir(ui), defaultName), []byte(body), 0o644)
+	return atomicWriteFile(filepath.Join(assetsDir(ui), defaultName), []byte(body), 0o644)
 }
 
 // --------------------------------------------------------------- uninstall ---
@@ -371,29 +474,52 @@ func uninstall(ui string, quiet bool) error {
 	if err != nil {
 		return err
 	}
-	s := string(html)
-	if i := strings.Index(s, markerStart); i != -1 {
-		j := strings.Index(s, markerEnd)
-		if j != -1 {
-			s = strings.TrimRight(s[:i], "\r\n") + s[j+len(markerEnd):]
-			if err := os.WriteFile(idx, []byte(s), 0o644); err != nil {
+	stripped, found, err := stripInjected(string(html))
+	if err != nil {
+		return err
+	}
+	backup, backupErr := os.ReadFile(backupPath(ui))
+	m := readManifest(ui)
+	restored := false
+	if backupErr == nil && m != nil && m.OriginalSHA == sha256Hex(backup) {
+		matchesBackup := stripped == string(backup) || stripped == string(backup)+"\n" || stripped == string(backup)+"\r\n"
+		if matchesBackup {
+			if err := atomicWriteFile(idx, backup, 0o644); err != nil {
 				return err
 			}
+			if err := os.Remove(backupPath(ui)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			restored = true
+		} else if found {
+			// The page changed outside our block (an app update, or a user edit).
+			// Strip the injection but do NOT restore the stale backup over it.
+			if err := atomicWriteFile(idx, []byte(stripped), 0o644); err != nil {
+				return err
+			}
+			if !quiet {
+				warn("Removed Theme Studio without restoring the older backup; index.html contains newer changes")
+			}
 		}
-	}
-	_ = os.Remove(filepath.Join(assetsDir(ui), engineName))
-	_ = os.Remove(filepath.Join(assetsDir(ui), communityName))
-	_ = os.Remove(filepath.Join(assetsDir(ui), defaultName))
-	_ = os.Remove(manifestPath(ui))
-	if !quiet {
-		ok("Removed injected script tags, engine and manifest")
-	}
-	if b, err := os.ReadFile(backupPath(ui)); err == nil {
-		if err := os.WriteFile(idx, b, 0o644); err != nil {
+	} else if found {
+		if err := atomicWriteFile(idx, []byte(stripped), 0o644); err != nil {
 			return err
 		}
-		_ = os.Remove(backupPath(ui))
-		if !quiet {
+	}
+	if !found && !quiet {
+		info("No Theme Studio marker was present in index.html")
+	}
+	for _, name := range []string{engineName, communityName, defaultName} {
+		if err := os.Remove(filepath.Join(assetsDir(ui), name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing %s: %w", name, err)
+		}
+	}
+	if err := os.Remove(manifestPath(ui)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if !quiet {
+		ok("Removed injected scripts, engine and manifest")
+		if restored {
 			ok("Restored original index.html")
 		}
 	}
@@ -422,6 +548,15 @@ func status(ui, install string) {
 	}
 	if _, err := os.Stat(filepath.Join(assetsDir(ui), defaultName)); err == nil {
 		fmt.Printf("  baked theme file present\n")
+	}
+	if guardInstalled() {
+		if runEntryPresent() {
+			ok("Background guard is installed (restarts Freebuff's panel after an update)")
+		} else {
+			warn("Background guard is installed but not registered to start at logon")
+		}
+	} else {
+		fmt.Printf("  guard     not installed (a Freebuff update will remove the panel)\n")
 	}
 	checkThemeCookies(install)
 }
@@ -467,22 +602,78 @@ type cookieReport struct {
 	Remaining int    `json:"remaining"`
 }
 
+/*
+ * Every cookie jar that can hold our cookies.
+ *
+ * Chromium keeps the default profile's jar at <userData>/Network/Cookies, but
+ * an Electron build can also run additional profiles under
+ * <userData>/Partitions/<name>/Network/Cookies. Missing those was how a reset
+ * could report success while a second profile still carried an oversized theme
+ * and kept the app on a blank window. Only jars that actually contain our
+ * prefix are returned, so no other application's cookies are ever touched.
+ */
 func profileCookieDBs() []string {
-	var out []string
+	var names []string
+	seenName := map[string]bool{}
 	for _, root := range []string{os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")} {
 		if root == "" {
 			continue
 		}
-		for _, name := range []string{"Freebuff", "@codebufffreebuff-desktop", "freebuff-desktop", "Freebuff Desktop"} {
-			p := filepath.Join(root, name, "Network", "Cookies")
-			b, err := os.ReadFile(p)
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if !strings.Contains(strings.ToLower(name), "freebuff") {
+				continue
+			}
+			if seenName[name] {
+				continue
+			}
+			seenName[name] = true
+			names = append(names, name)
+		}
+	}
+
+	var candidates []string
+	for _, root := range []string{os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")} {
+		if root == "" {
+			continue
+		}
+		for _, name := range names {
+			base := filepath.Join(root, name)
+			candidates = append(candidates, filepath.Join(base, "Network", "Cookies"))
+			parts, err := os.ReadDir(filepath.Join(base, "Partitions"))
 			if err != nil {
 				continue
 			}
-			// Only the jar that actually has our cookies in it.
-			if bytes.Contains(b, []byte("fbts")) {
-				out = append(out, p)
+			for _, p := range parts {
+				if !p.IsDir() {
+					continue
+				}
+				candidates = append(candidates, filepath.Join(base, "Partitions", p.Name(), "Network", "Cookies"))
 			}
+		}
+	}
+
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range candidates {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		// Only a jar that really holds our cookies in it.
+		if bytes.Contains(b, []byte("fbts")) {
+			out = append(out, p)
 		}
 	}
 	return out
@@ -581,7 +772,24 @@ func clearThemeCookies(install string, quiet bool) (int, bool) {
 			ok("Removed %d theme cookies (%d bytes) from %s", rep.Cookies, rep.Bytes, filepath.Base(filepath.Dir(filepath.Dir(db))))
 		}
 	}
-	return removed, true
+	failed := false
+	for _, db := range dbs {
+		rep, err := runCookieScript(bun, db, "report")
+		if err != nil {
+			failed = true
+			if !quiet {
+				warn("Could not verify cleared cookies in %s: %v", db, err)
+			}
+			continue
+		}
+		if rep.Cookies != 0 {
+			failed = true
+			if !quiet {
+				warn("%d Theme Studio cookies remain in %s", rep.Cookies, db)
+			}
+		}
+	}
+	return removed, !failed
 }
 
 // checkThemeCookies warns when the stored theme has grown past the size the
@@ -637,22 +845,402 @@ func relaunch(ui string) {
 	info("Launching Freebuff\u2026")
 	cmd := exec.Command(exe)
 	cmd.Dir = ui
-	_ = cmd.Start()
+	if err := cmd.Start(); err != nil {
+		warn("Could not launch Freebuff: %v", err)
+	}
+}
+
+// ------------------------------------------------------- update survival ---
+
+/*
+ * Freebuff's own updater replaces resources/orchestrator wholesale - index.html,
+ * the assets beside it and every file we wrote in there - so after every
+ * Freebuff update the panel was simply gone, and the fix was to find this exe
+ * and run it again by hand.
+ *
+ * So an install also leaves a guard behind: this same exe, copied to
+ * %LOCALAPPDATA%\FreebuffThemeStudio and started at logon from the current
+ * user's Run key, sitting in a quiet loop. When index.html stops carrying our
+ * markers, or the engine file disappears, it writes them back.
+ *
+ * Two things it deliberately does not trust:
+ *
+ *   - the manifest inside the install. The updater deletes it along with
+ *     everything else in that folder, so "was this installed?" is answered by
+ *     guard.json in the guard's own folder, written on install and removed by
+ *     --uninstall or --remove-watch.
+ *   - a freshly written file. An update is still writing when we notice it, so
+ *     an index.html younger than watchSettle is left for the next tick.
+ *
+ * It is user-scoped (HKCU, no admin), prints nothing, and is one process: a
+ * pid file stops a second one from starting beside it.
+ */
+
+const (
+	watchRunName = "FreebuffThemeStudio"
+	// Long enough that an interface file is not re-read several times a second,
+	// short enough that a panel wiped by an update is back before the user
+	// notices it was gone.
+	watchInterval = 15 * time.Second
+	// An update is still writing when we first see the file.
+	watchSettle  = 1500 * time.Millisecond
+	detachedFlag = 0x00000008 // DETACHED_PROCESS: start without a console
+)
+
+func watchDir() string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		base = filepath.Join(home, "AppData", "Local")
+	}
+	return filepath.Join(base, "FreebuffThemeStudio")
+}
+
+func watchExePath() string { return filepath.Join(watchDir(), "FreebuffThemeInjector.exe") }
+func watchPidPath() string { return filepath.Join(watchDir(), "watcher.pid") }
+func watchLogPath() string { return filepath.Join(watchDir(), "watcher.log") }
+func guardPath() string    { return filepath.Join(watchDir(), "guard.json") }
+
+// hideConsoleWindow is what keeps the guard from flashing a console at logon.
+// A process started from the Run key gets a console of its own.
+func hideConsoleWindow() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	h, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("GetConsoleWindow").Call()
+	if h != 0 {
+		_, _, _ = syscall.NewLazyDLL("user32.dll").NewProc("ShowWindow").Call(h, 0) // SW_HIDE
+	}
+}
+
+// On Windows os.FindProcess opens the process and fails when the pid is gone.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	_ = p.Release()
+	return true
+}
+
+func processName(pid int) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Split(string(out), ",")
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.Trim(strings.TrimSpace(fields[0]), `"`)
+}
+
+func readWatchPid() int {
+	b, err := os.ReadFile(watchPidPath())
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// stopWatcher only ever signals a process that is both recorded in our pid
+// file and answers to our own executable name; a recycled pid belonging to
+// something else is left alone.
+func stopWatcher() {
+	pid := readWatchPid()
+	if pid != 0 && pid != os.Getpid() && processAlive(pid) && strings.EqualFold(processName(pid), filepath.Base(os.Args[0])) {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+			_ = p.Release()
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	_ = os.Remove(watchPidPath())
+}
+
+func watchLog(msg string) {
+	line := time.Now().Format("2006-01-02 15:04:05") + " " + msg + "\r\n"
+	f, err := os.OpenFile(watchLogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Size() > 64*1024 {
+		_ = f.Truncate(0)
+	}
+	_, _ = f.WriteString(line)
+}
+
+type guardRecord struct {
+	Installed bool   `json:"installed"`
+	Version   string `json:"version"`
+	Install   string `json:"install"`
+}
+
+func readGuard() *guardRecord {
+	b, err := os.ReadFile(guardPath())
+	if err != nil {
+		return nil
+	}
+	var g guardRecord
+	if json.Unmarshal(b, &g) != nil || !g.Installed {
+		return nil
+	}
+	return &g
+}
+
+func guardInstalled() bool { return readGuard() != nil }
+
+func setGuard(install string) error {
+	if dir := watchDir(); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	b, _ := json.MarshalIndent(map[string]any{
+		"installed":   true,
+		"version":     version,
+		"install":     install,
+		"installedAt": time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
+	return atomicWriteFile(guardPath(), b, 0o644)
+}
+
+func clearGuard() {
+	_ = os.Remove(guardPath())
+}
+
+func runKey() string { return `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` }
+
+func setRunEntry(command string) error {
+	cmd := exec.Command("reg", "add", runKey(), "/v", watchRunName, "/t", "REG_SZ", "/d", command, "/f")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("registering the guard to start at logon: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func clearRunEntry() {
+	cmd := exec.Command("reg", "delete", runKey(), "/v", watchRunName, "/f")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Run() // absent is the normal case during uninstall
+}
+
+func runEntryPresent() bool {
+	cmd := exec.Command("reg", "query", runKey(), "/v", watchRunName)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	return err == nil && strings.Contains(string(out), watchRunName)
+}
+
+// startWatcher launches the guard detached from this console so it does not
+// die when the installer's window closes.
+func startWatcher() {
+	exe := watchExePath()
+	if _, err := os.Stat(exe); err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "--watch", "--quiet")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: detachedFlag}
+	if err := cmd.Start(); err != nil {
+		watchLog("could not start the guard: " + err.Error())
+		return
+	}
+	_ = cmd.Process.Release()
+}
+
+// promoteWatcher puts this build of the injector where the guard runs from.
+// The old copy may still be in that file, so it is stopped and moved aside
+// first: a running image can be renamed on Windows, but not overwritten.
+func promoteWatcher() error {
+	dir := watchDir()
+	if dir == "" {
+		return errors.New("LOCALAPPDATA is not set")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	selfAbs, _ := filepath.Abs(self)
+	dstAbs, _ := filepath.Abs(watchExePath())
+	if strings.EqualFold(selfAbs, dstAbs) {
+		return nil
+	}
+	stopWatcher()
+	data, err := os.ReadFile(self)
+	if err != nil {
+		return fmt.Errorf("reading this executable: %w", err)
+	}
+	if _, err := os.Stat(watchExePath()); err == nil {
+		if err := os.Rename(watchExePath(), watchExePath()+".old"); err != nil {
+			return fmt.Errorf("replacing the running guard: %w", err)
+		}
+	}
+	if err := atomicWriteFile(watchExePath(), data, 0o755); err != nil {
+		return fmt.Errorf("writing the guard: %w", err)
+	}
+	_ = os.Remove(watchExePath() + ".old")
+	return nil
+}
+
+// installWatch is what makes the panel survive a Freebuff update.
+func installWatch(install string) error {
+	if err := promoteWatcher(); err != nil {
+		return err
+	}
+	if err := setGuard(install); err != nil {
+		return err
+	}
+	// No --path on purpose: the guard re-detects the install every tick, so it
+	// still finds Freebuff if it is ever reinstalled somewhere else.
+	if err := setRunEntry(`"` + watchExePath() + `" --watch --quiet`); err != nil {
+		return err
+	}
+	startWatcher()
+	return nil
+}
+
+// removeWatch takes the guard away again: no logon entry, no process, no files.
+func removeWatch() {
+	clearRunEntry()
+	stopWatcher()
+	clearGuard()
+	for _, f := range []string{watchPidPath(), watchExePath(), watchLogPath(), watchExePath() + ".old"} {
+		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+			// An image that is still shutting down can only be moved aside.
+			_ = os.Rename(f, f+".old")
+		}
+	}
+	// The folder belongs to this guard and nothing else. Failing to remove a
+	// still-running image is expected and harmless; the logon entry is gone.
+	_ = os.RemoveAll(watchDir())
+}
+
+// needsInjection says whether index.html should be written again, and why.
+func needsInjection(ui string) (bool, string) {
+	idx := indexPath(ui)
+	st, err := os.Stat(idx)
+	if err != nil {
+		return false, "" // mid-update, or the folder is being replaced
+	}
+	if time.Since(st.ModTime()) < watchSettle {
+		return false, "" // still being written; the next tick catches it
+	}
+	html, err := os.ReadFile(idx)
+	if err != nil {
+		return false, ""
+	}
+	_, _, injected, err := markerBounds(string(html))
+	if err != nil {
+		return false, "" // damaged markers need a person, not a loop
+	}
+	if !injected {
+		return true, "the injection was removed by a Freebuff update"
+	}
+	if _, err := os.Stat(filepath.Join(assetsDir(ui), engineName)); err != nil {
+		return true, "the engine file was removed by a Freebuff update"
+	}
+	return false, ""
+}
+
+func watchTick() {
+	g := readGuard()
+	if g == nil {
+		return
+	}
+	// The install the guard was set up for first: it must never write into a
+	// different copy of Freebuff than the one the user installed into. If that
+	// path has stopped being a Freebuff install (reinstalled elsewhere), fall
+	// back to detection so the panel still comes back.
+	install := g.Install
+	if install == "" || !isInstallDir(install) {
+		found, err := findInstallDir("")
+		if err != nil {
+			return // no Freebuff to guard right now
+		}
+		install = found
+	}
+	ui := filepath.Join(install, "resources", "orchestrator", "ui")
+	if readManifest(ui) == nil {
+		// The updater wiped the install's own record. The guard record says we
+		// belong here, so this is exactly the case to repair.
+		if _, err := os.Stat(indexPath(ui)); err != nil {
+			return
+		}
+	}
+	need, why := needsInjection(ui)
+	if !need {
+		return
+	}
+	if err := inject(ui, true); err != nil {
+		watchLog("inject after update failed: " + err.Error())
+		return
+	}
+	watchLog("re-injected: " + why)
+}
+
+// runWatch is the guard loop. It never prints: it lives behind a logon entry.
+func runWatch() {
+	hideConsoleWindow()
+	if watchDir() == "" {
+		return // nowhere to keep the pid file
+	}
+	if pid := readWatchPid(); pid != 0 && pid != os.Getpid() && processAlive(pid) &&
+		strings.EqualFold(processName(pid), filepath.Base(os.Args[0])) {
+		return // a guard is already on duty
+	}
+	_ = os.MkdirAll(watchDir(), 0o755)
+	_ = os.WriteFile(watchPidPath(), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	defer func() {
+		// Stand down without touching a successor's record.
+		if readWatchPid() == os.Getpid() {
+			_ = os.Remove(watchPidPath())
+		}
+	}()
+	for {
+		watchTick()
+		time.Sleep(watchInterval)
+		// Disarmed (--remove-watch) or superseded by a newer build: leave.
+		if readWatchPid() != os.Getpid() {
+			return
+		}
+	}
 }
 
 func main() {
 	initColors()
 
 	var (
-		pathFlag      = flag.String("path", "", "Freebuff install directory (auto-detected by default)")
-		uninstallFlag = flag.Bool("uninstall", false, "remove the injected UI and restore the original index.html")
-		statusFlag    = flag.Bool("status", false, "show whether Theme Studio is installed")
-		themeFlag     = flag.String("theme", "", "path to a .fbtheme or .json theme to bake in as the default")
-		resetFlag     = flag.Bool("reset-theme", false, "delete the stored theme cookies (the fix for an app that opens on a blank window)")
-		repairFlag    = flag.Bool("repair", false, "reinstall the current files and clear the stored theme cookies")
-		restartFlag   = flag.Bool("restart", false, "close Freebuff if it is running and start it again")
-		openFlag      = flag.Bool("open", false, "open the UI folder in Explorer")
-		quietFlag     = flag.Bool("quiet", false, "less output")
+		pathFlag        = flag.String("path", "", "Freebuff install directory (auto-detected by default)")
+		uninstallFlag   = flag.Bool("uninstall", false, "remove the injected UI and restore the original index.html")
+		statusFlag      = flag.Bool("status", false, "show whether Theme Studio is installed")
+		themeFlag       = flag.String("theme", "", "path to a .fbtheme or .json theme to bake in as the default")
+		resetFlag       = flag.Bool("reset-theme", false, "delete the stored theme cookies (the fix for an app that opens on a blank window)")
+		repairFlag      = flag.Bool("repair", false, "reinstall the current files while preserving stored theme settings")
+		restartFlag     = flag.Bool("restart", false, "close Freebuff if it is running and start it again")
+		openFlag        = flag.Bool("open", false, "open the UI folder in Explorer")
+		quietFlag       = flag.Bool("quiet", false, "less output")
+		watchFlag       = flag.Bool("watch", false, "run quietly in the background, re-injecting after Freebuff updates")
+		removeWatchFlag = flag.Bool("remove-watch", false, "stop the background guard and remove it from logon")
 	)
 	flag.Usage = func() {
 		banner()
@@ -667,6 +1255,7 @@ func main() {
 		fmt.Println("  FreebuffThemeInjector.exe --restart")
 		fmt.Println("  FreebuffThemeInjector.exe --theme my-theme.json")
 		fmt.Println("  FreebuffThemeInjector.exe --status")
+		fmt.Println("  FreebuffThemeInjector.exe --remove-watch")
 		fmt.Println("  FreebuffThemeInjector.exe --repair --restart")
 		fmt.Println("  FreebuffThemeInjector.exe --uninstall")
 		fmt.Println()
@@ -676,6 +1265,21 @@ func main() {
 	flag.Parse()
 
 	quiet := *quietFlag
+
+	// The guard and its removal need no install detection of their own: the
+	// guard re-detects every tick, and removal touches only this user's files.
+	if *watchFlag {
+		runWatch()
+		return
+	}
+	if *removeWatchFlag {
+		removeWatch()
+		if !quiet {
+			banner()
+			ok("Background guard stopped and removed (logon entry, process and files)")
+		}
+		return
+	}
 
 	if !quiet {
 		banner()
@@ -711,14 +1315,18 @@ func main() {
 		if !quiet {
 			step("Removing Theme Studio")
 		}
+		// Clear and verify cookies before touching the installation. A failed
+		// cleanup must not be reported as a successful uninstall.
+		if _, ok := clearThemeCookies(install, quiet); !ok {
+			os.Exit(1)
+		}
 		if err := uninstall(ui, quiet); err != nil {
 			warn("%v", err)
 			os.Exit(1)
 		}
-		// The theme cookies are ours, and they are the one thing an uninstall
-		// used to leave behind - including the oversized ones that make the app
-		// impossible to open. Take them with us.
-		clearThemeCookies(install, quiet)
+		// Nothing may re-inject after an uninstall: without this the guard
+		// would put the panel straight back on the next Freebuff update.
+		removeWatch()
 		fmt.Println()
 		ok("Freebuff is back to stock. Restart it if it is running.")
 		if *restartFlag {
@@ -769,12 +1377,18 @@ func main() {
 		ok("Wrote assets/%s (%d bytes)", communityName, len(communityJS))
 	}
 
-	if *repairFlag {
-		// The injected files are now whatever this build carries; the stored
-		// theme is the other half of a repair, and the only part of it that can
-		// stop the app from opening at all.
-		clearThemeCookies(install, quiet)
+	// The panel comes back by itself after Freebuff updates itself. Without a
+	// guard, an update replaced index.html and the panel was simply gone.
+	if err := installWatch(install); err != nil {
+		warn("Could not set up the background guard: %v", err)
+		info("       Run this installer again after a Freebuff update to restore the panel.")
+	} else if !quiet {
+		ok("Guarding against Freebuff updates (background, %s)", watchDir())
+		info("   The panel re-installs itself after an update; --remove-watch takes this away.")
 	}
+
+	// Repair only refreshes extension files. Theme data is preserved; use the
+	// explicit --reset-theme flag when the user wants to clear stored settings.
 
 	if *openFlag {
 		_ = exec.Command("explorer.exe", ui).Start()
@@ -806,7 +1420,9 @@ func main() {
 			if !quiet {
 				step("Relaunching Freebuff")
 			}
-			stopFreebuff(quiet)
+			if !stopFreebuff(quiet) {
+				os.Exit(1)
+			}
 			relaunch(install)
 		}
 	} else if *restartFlag {

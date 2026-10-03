@@ -81,9 +81,9 @@ The window you see is only open for a few seconds; you can close it by pressing 
 ## How to use it
 
 Click the **palette icon** in the sidebar. The Theme Studio page fills the workspace area,
-with seven tabs across the top: **Presets**, **Community**, **Colors**, **Layout**,
-**Logo and background**, **Advanced** and **Export**. Each tab is a stack of boxes, and
-each box holds one kind of control.
+with eight tabs across the top: **Presets**, **Community**, **Colors**, **Layout**,
+**Logo and background**, **Advanced**, **Export** and **Settings**. Each tab is a stack of
+boxes, and each box holds one kind of control.
 
 Changes apply as you make them and are saved on their own. There is no save button.
 
@@ -306,6 +306,22 @@ is the same as choosing "later".
 To install the new version, run the new `FreebuffThemeInjector.exe` the same way you ran
 the first one. You do not need to remove anything first, and your theme is kept.
 
+### Settings
+
+Everything that is about the editor rather than the colours:
+
+- **Light and dark** - whether a theme may switch Freebuff's own appearance to match its
+  palette (on by default), and the dark/light choice for the app's own controls.
+- **Updates** - turn the quiet hourly version check on or off, check right now, see when
+  the last check ran, and forget a version you chose to skip.
+- **Storage** - how much of the stored-theme budget is in use, a **Save now** button, and a
+  way to drop the same-session cache.
+- **Delete** - **Delete Theme Studio** erases your theme, every saved setting and every
+  style the page wrote into Freebuff, after a confirmation. It cannot delete the panel's
+  own files, because a web page is not allowed to delete files from the install folder;
+  it tells you the one command that finishes the job (`FreebuffThemeInjector.exe
+  --uninstall`) and can copy it for you.
+
 ---
 
 ## Sharing a theme
@@ -333,7 +349,8 @@ A theme file is a small text file like this:
   "logo": { "image": "data:image/svg+xml,...", "size": 1, "opacity": 1, "filter": "" },
   "window": { "ink": "", "hoverBg": "", "hoverInk": "", "closeBg": "", "closeInk": "" },
   "raw": "",
-  "scheme": ""
+  "scheme": "",
+  "settings": { "followThemeAppearance": true, "autoUpdate": true }
 }
 ```
 
@@ -382,9 +399,15 @@ Press `Ctrl+R` in Freebuff. If that does not help, close Freebuff completely and
 again. Reloading the page is what makes Freebuff pick up the new file.
 
 **It worked before, then stopped after a Freebuff update.**
-Freebuff updates replace the interface file, which removes the icon. Run
-`FreebuffThemeInjector.exe` again. It is safe to run as many times as you like; it never
-creates duplicates.
+Freebuff updates replace the interface file, which removes the icon. A background guard
+puts it back on its own within about twenty seconds of the update - see
+[Surviving a Freebuff update](#surviving-a-freebuff-update). If the panel is still
+missing, run `FreebuffThemeInjector.exe` again; it is safe to run as many times as you
+like and never creates duplicates.
+
+**How do I know the guard is there?**
+`FreebuffThemeInjector.exe --status` says so, and `--remove-watch` takes it away again
+(logon entry, process and files, in one command).
 
 **I want to start over.**
 Use **Reset all** in the bottom bar of the page, or run
@@ -421,7 +444,22 @@ are no longer stored in cookies, and the stored theme has a hard size ceiling.
 
 **Something looks broken and I want it gone.**
 Run `FreebuffThemeInjector.exe --uninstall`. This always works, even if the page itself
-will not load.
+will not load. Uninstall removes the injected block rather than restoring the old file
+blindly: if Freebuff updated itself after the install, the newer file is kept and only the
+Theme Studio part is taken out.
+
+**Parts of the app keep the light colours - the settings page, a dialog, or the panel itself.**
+Freebuff ships a light and a dark palette and switches between them with its own appearance
+setting. A theme now carries its own appearance with it: applying a dark theme also puts the
+app's palette switch into dark, and every token the theme sets is re-declared on the elements
+Freebuff itself declares it on, so nothing is left wearing the other palette. If you still see
+this with a theme made by an old version, update the extension - it was a bug in the editor,
+not in your theme.
+
+**Something looks wrong but I want to keep my theme.**
+Run `FreebuffThemeInjector.exe --repair`. It rewrites the extension files from this build
+and leaves your saved colours, layout and gradient settings untouched. Use
+`--reset-theme` only when you actually want the stored theme deleted.
 
 **The installer cannot find Freebuff.**
 Point it at the folder yourself with `--path`, for example:
@@ -444,11 +482,13 @@ have it reopened for you.
 | `--status` | Check whether it is installed, and how big the stored theme is |
 | `--uninstall` | Remove it, restore the original file and clear the stored theme |
 | `--reset-theme` | Delete only the stored theme cookies - the fix for a blank grey window |
-| `--repair` | Reinstall the current files and clear the stored theme |
+| `--repair` | Rewrite the current files and keep your stored theme |
 | `--theme FILE` | Use a theme file as the starting theme for new sessions |
 | `--path DIR` | Target a specific Freebuff folder |
 | `--restart` | Close Freebuff if it is running, then start it again |
 | `--open` | Open the interface folder in File Explorer |
+| `--remove-watch` | Stop the background guard and remove it from logon |
+| `--watch` | What the guard runs as; you do not start this by hand |
 | `--quiet` | Print less |
 
 Examples:
@@ -552,8 +592,13 @@ The editor asks for it through jsDelivr, which is a read-only mirror of this rep
 cross-origin stylesheet that is not `text/css`. jsDelivr serves the same file as
 `text/css`, so no CORS and no extra hosting are needed.
 
-The same path is tried on all three of jsDelivr's edge networks - `cdn`, `fastly` and
-`gcore` - in turn, so one dead CDN no longer means the check goes quiet for good.
+The same file is requested from all three of jsDelivr's edge networks - `cdn`, `fastly`
+and `gcore` - **and** from `cdn.statically.io` at the same time, and the **newest** answer
+wins. That matters: jsDelivr's networks have been seen serving three different versions of
+the feed at once, and asking them one after another meant the first stale edge decided the
+answer - a release nobody was ever told about, which is how "auto update does not work"
+starts. One fresh host is now enough, and no host can hang the check: each probe gives up
+after eight seconds.
 
 jsDelivr sends `max-age=604800` for browser caches, so the request carries a per-hour query
 string. jsDelivr ignores query strings for its own cache, so this only stops a browser from
@@ -668,10 +713,37 @@ python -m http.server 8199 --bind 127.0.0.1
 
 ---
 
+## Surviving a Freebuff update
+
+Freebuff's updater replaces `resources/orchestrator` as a whole, including the interface
+file the panel is injected into. Before the guard existed, every Freebuff update quietly
+removed Theme Studio until the installer was run again.
+
+So an install also leaves a small guard behind:
+
+- a copy of this exe in `%LOCALAPPDATA%\FreebuffThemeStudio`,
+- a `Run` value in **HKCU** (your account only - no admin, nothing machine-wide) that
+  starts it at logon,
+- `guard.json` in that folder, which records that the panel belongs to this machine.
+
+Every fifteen seconds the guard looks at the interface file. If the injection or the
+engine has been swept away by an update, it writes them back - using `guard.json`, because
+the updater deletes the install's own manifest along with everything else in that folder.
+It waits for the file to stop changing first, so it never writes into an update that is
+still being unpacked, and it only ever touches the install it was set up for. It prints
+nothing; what it did is appended to `watcher.log` next to it.
+
+`FreebuffThemeInjector.exe --uninstall` and `--remove-watch` both take the guard away
+again - entry, process and files. It is a normal background process: no service, no
+driver, no scheduled task, and it does nothing except watch one file.
+
+---
+
 ## Things to know
 
-- A Freebuff update removes the palette icon, because it replaces the interface file.
-  Running the installer again brings it back.
+- A Freebuff update used to remove the palette icon, because it replaces the interface
+  file. The background guard now puts it back by itself; running the installer again does
+  the same thing and is always safe.
 - The editor also appears in Freebuff's separate thread windows, which is intended.
 - This is an unofficial tool, not made by Freebuff. The README says so at the top, the
   Theme Studio header says so, and the installer prints it when it runs.
