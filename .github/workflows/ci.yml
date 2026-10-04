@@ -134,4 +134,14 @@ jobs:
         if: ${{ !github.event.repository.fork }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The workflow fires on the tag push, which is before the release
+          # exists, so create it rather than assuming it is already there.
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" dist/* --clobber --repo "$REPO"
+          echo "published $TAG"
