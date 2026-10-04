@@ -16,7 +16,7 @@
 ;(function () {
   'use strict'
 
-  var VERSION = '1.4.1'
+  var VERSION = '1.4.2'
 
   /*
    * The uninstall command to show and copy. The injector writes its own file

@@ -42,7 +42,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.4.1"
+	version       = "1.4.2"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
@@ -127,14 +127,34 @@ func findInstallDir(override string) (string, error) {
 		return abs, nil
 	}
 	seen := map[string]bool{}
+	var readOnly string
 	for _, c := range candidateDirs() {
 		if c == "" || seen[c] {
 			continue
 		}
 		seen[c] = true
-		if isInstallDir(c) {
-			return c, nil
+		if !isInstallDir(c) {
+			continue
 		}
+		// A live AppImage mount is a valid install but cannot be written to, so
+		// it is only used when nothing better exists. Otherwise it would always
+		// win over an extracted copy that would actually work.
+		if isReadOnlyPath(filepath.Join(c, "resources", "orchestrator", "ui")) {
+			if readOnly == "" {
+				readOnly = c
+			}
+			continue
+		}
+		return c, nil
+	}
+	if readOnly != "" {
+		return "", fmt.Errorf("found Freebuff at %s, but that is a running AppImage and it is\n"+
+			"       mounted read-only, so the panel cannot be installed into it.\n\n"+
+			"       Extract it once, then point --path at the extracted copy:\n\n"+
+			"           ./Freebuff-linux-x86_64.AppImage --appimage-extract\n"+
+			"           ./FreebuffThemeInjector --path squashfs-root\n\n"+
+			"       Then start Freebuff from ./squashfs-root, not from the AppImage:\n"+
+			"           ./squashfs-root/freebuff\n", readOnly)
 	}
 	return "", errors.New("could not find a Freebuff Desktop install\n\n" + notFoundHelp())
 }
@@ -233,16 +253,22 @@ func stripInjected(html string) (string, bool, error) {
 // checkWritable refuses early when the install cannot be written to. A live
 // AppImage mount is the case that matters: the write would fail much later, in
 // the middle of replacing index.html, with a bare permission error.
+//
+// The filesystem can refuse in more than one way: a read-only filesystem
+// reports EROFS rather than EACCES, and both have to be caught here or the user
+// gets "read-only file system" with no idea what to do about it.
 func checkWritable(ui string) error {
 	dir := filepath.Dir(ui)
 	probe, err := os.CreateTemp(dir, ".fbts-probe-*")
 	if err != nil {
-		if os.IsPermission(err) {
+		if isReadOnlyErr(err) || os.IsPermission(err) {
 			return fmt.Errorf("%s cannot be written to, so the panel cannot be installed there.\n\n"+
-				"       A running Linux AppImage is mounted read-only. Extract it first and\n"+
-				"       point --path at the extracted folder:\n"+
+				"       A running Linux AppImage is mounted read-only, which is why.\n"+
+				"       Extract it once, then point --path at the extracted copy:\n\n"+
 				"           ./Freebuff-linux-x86_64.AppImage --appimage-extract\n"+
-				"           ./FreebuffThemeInjector --path squashfs-root\n", ui)
+				"           ./FreebuffThemeInjector --path squashfs-root\n\n"+
+				"       Then start Freebuff from ./squashfs-root, not from the AppImage:\n"+
+				"           ./squashfs-root/freebuff\n", ui)
 		}
 		return err
 	}

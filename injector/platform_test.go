@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -303,5 +304,47 @@ func TestCheckWritableAcceptsOrdinaryDirectory(t *testing.T) {
 	_, ui := newTestInstall(t, sampleIndex)
 	if err := checkWritable(ui); err != nil {
 		t.Fatalf("a writable ui dir must pass: %v", err)
+	}
+}
+
+// isReadOnlyErr is what turns a bare "read-only file system" into an
+// explanation. os.IsPermission only covers EACCES, which is the bug: a
+// read-only filesystem reports EROFS and used to fall through to the raw error.
+func TestIsReadOnlyErrCoversErofs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows installs are always writable; there is no EROFS branch there.
+		if isReadOnlyErr(syscall.EROFS) {
+			t.Fatalf("Windows must never report a read-only filesystem")
+		}
+		return
+	}
+	if !isReadOnlyErr(syscall.EROFS) {
+		t.Fatalf("EROFS must be recognised as a read-only filesystem")
+	}
+	if !isReadOnlyErr(&os.PathError{Op: "create", Path: "/tmp", Err: syscall.EROFS}) {
+		t.Fatalf("EROFS wrapped in a PathError must still be recognised")
+	}
+	if isReadOnlyErr(nil) {
+		t.Fatalf("no error must not be reported as read-only")
+	}
+	if isReadOnlyErr(syscall.ENOENT) {
+		t.Fatalf("a missing file is not a read-only filesystem")
+	}
+}
+
+// A writable directory must never be mistaken for a read-only one, otherwise
+// detection would skip perfectly good installs.
+func TestWritableDirectoryIsNotReadOnly(t *testing.T) {
+	if isReadOnlyPath(t.TempDir()) {
+		t.Fatalf("a fresh temp dir must be treated as writable")
+	}
+}
+
+// checkWritable has to accept an ordinary install; on Linux the read-only
+// branch is covered by isReadOnlyErr above.
+func TestCheckWritableAcceptsNormalInstall(t *testing.T) {
+	_, ui := newTestInstall(t, sampleIndex)
+	if err := checkWritable(ui); err != nil {
+		t.Fatalf("a writable install must pass checkWritable: %v", err)
 	}
 }

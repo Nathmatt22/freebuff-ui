@@ -77,6 +77,11 @@ func detachProc(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: detachedFlag}
 }
 
+// An installed Windows tree is always writable, so there is nothing to detect.
+func isReadOnlyErr(err error) bool { return false }
+
+func isReadOnlyPath(dir string) bool { return false }
+
 // --------------------------------------------------------------- locating ---
 
 // runningExecutable prefers the live process: it is the install the user runs.

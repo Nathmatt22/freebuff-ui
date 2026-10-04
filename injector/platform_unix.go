@@ -160,6 +160,50 @@ func runningExecutable() string {
 	return ""
 }
 
+// isReadOnlyErr recognises the two ways a filesystem refuses a write. EROFS
+// ("read-only file system") is what an AppImage mount answers with, and it is
+// not covered by os.IsPermission, which only sees EACCES.
+func isReadOnlyErr(err error) bool {
+	return errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.EACCES) || os.IsPermission(err)
+}
+
+// isReadOnlyPath reports whether a directory cannot be written to, checked
+// before anything is touched so the user gets the reason instead of a failure
+// partway through replacing index.html.
+func isReadOnlyPath(dir string) bool {
+	// Ask the filesystem directly: this is the same call that would fail later.
+	probe, err := os.CreateTemp(dir, ".fbts-probe-*")
+	if err != nil {
+		if isReadOnlyErr(err) {
+			return true
+		}
+		// Any other failure here (missing dir, for instance) is not proof of a
+		// read-only filesystem.
+		return false
+	}
+	name := probe.Name()
+	probe.Close()
+	_ = os.Remove(name)
+
+	// A writable squashfs mount is unusual, but treat one as read-only anyway:
+	// the AppImage would be replaced on next launch and take the panel with it.
+	mounts, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(mounts), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || !strings.HasPrefix(f[2], "squashfs") {
+			continue
+		}
+		point := strings.TrimSuffix(f[1], "/")
+		if dir == point || strings.HasPrefix(dir, point+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // appImageMounts lists the squashfs mounts an AppImage creates while running.
 // They are the only place the app's files exist on disk for a portable build.
 func appImageMounts() []string {
