@@ -293,3 +293,23 @@ func afterInstallNote() string {
 		"  which starts that same copy. Using the AppImage directly would\n" +
 		"  mount it read-only again, and the panel would not be there."
 }
+
+// staleCopyWarning explains the one situation that looks like a broken install:
+// the panel was installed into the extracted copy, but the Freebuff on screen is
+// the AppImage, which is a separate read-only tree and has no panel in it.
+func staleCopyWarning(ui string) string {
+	if !appImageReady() || appImageStale() {
+		return ""
+	}
+	if filepath.Dir(filepath.Dir(filepath.Dir(ui))) == extractedRoot() {
+		return "" // the running copy is the patched one
+	}
+	if runningExecutable() == "" {
+		return ""
+	}
+	return "  Freebuff is currently running from the AppImage, which is a\n" +
+		"  different copy from the one that was just patched. It has no panel.\n" +
+		"  Close Freebuff and start it again from the menu, or from:\n" +
+		"      " + filepath.Join(extractedRoot(), "freebuff") + "\n" +
+		"  Otherwise a reload will look like the install did nothing."
+}

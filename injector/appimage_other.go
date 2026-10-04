@@ -12,3 +12,7 @@ func looksLikeAppImage() bool { return false }
 func autoSetupAppImage() (string, error) {
 	return "", nil
 }
+
+// staleCopyWarning has nothing to say outside Linux, where the patched install
+// is the running one.
+func staleCopyWarning(ui string) string { return "" }

@@ -167,3 +167,36 @@ func TestExecFormatDetection(t *testing.T) {
 		t.Fatalf("unrelated output must not be treated as an exec problem")
 	}
 }
+
+// staleCopyWarning is the guard against "I installed it and nothing happened".
+// It must stay quiet when the running copy is the patched one, and speak up
+// when it is not.
+func TestStaleCopyWarningQuietWhenRunningCopyIsPatched(t *testing.T) {
+	withStateDir(t)
+	root := filepath.Join(appStateDir(), "squashfs-root")
+	ui := filepath.Join(root, "resources", "orchestrator", "ui")
+	if err := os.MkdirAll(ui, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(indexPath(ui), []byte(sampleIndex), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := inject(ui, true); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	if appImageStale() {
+		t.Fatalf("just injected, must not be stale")
+	}
+	// The ui is the patched tree itself, so there is nothing to warn about.
+	if w := staleCopyWarning(ui); w != "" {
+		t.Fatalf("the patched copy needs no warning, got:\n%s", w)
+	}
+}
+
+func TestStaleCopyWarningQuietWhenNothingExtracted(t *testing.T) {
+	withStateDir(t)
+	t.Setenv("HOME", t.TempDir())
+	if w := staleCopyWarning(filepath.Join(t.TempDir(), "ui")); w != "" {
+		t.Fatalf("with no AppImage set up there is nothing to warn about, got:\n%s", w)
+	}
+}

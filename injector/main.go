@@ -42,7 +42,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.5.0"
+	version       = "1.5.1"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
@@ -1277,6 +1277,12 @@ func main() {
 			warn("Freebuff is already running.")
 			fmt.Println("       The new panel appears the next time the UI loads - press Ctrl+R in Freebuff,")
 			fmt.Println("       or run this again with --restart to relaunch it cleanly.")
+			// The running copy is a different tree from the one just patched,
+			// so a reload would show a Freebuff with no panel at all.
+			if staleCopyWarning(ui) != "" {
+				fmt.Println()
+				fmt.Print(staleCopyWarning(ui))
+			}
 		}
 		if *restartFlag {
 			if !quiet {
