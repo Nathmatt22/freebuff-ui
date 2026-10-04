@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -198,5 +199,85 @@ func TestStaleCopyWarningQuietWhenNothingExtracted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if w := staleCopyWarning(filepath.Join(t.TempDir(), "ui")); w != "" {
 		t.Fatalf("with no AppImage set up there is nothing to warn about, got:\n%s", w)
+	}
+}
+
+/*
+ * The report from a real machine: the injector printed "Freebuff is already
+ * running" on a machine where nothing was running. It had matched itself, since
+ * this program is called FreebuffThemeInjector and its name contains the app's
+ * name. These tests pin that down.
+ */
+func TestInjectorIsNotMistakenForTheApp(t *testing.T) {
+	if isFreebuffProcess(strconv.Itoa(os.Getpid())) {
+		t.Fatalf("the injector must never report itself as the running app")
+	}
+}
+
+// An AppImage launcher is versioned, so the name cannot be guessed. The
+// .desktop file it ships is the reliable source.
+func TestRelaunchExeUsesDesktopEntry(t *testing.T) {
+	root := t.TempDir()
+	// A launcher with a name no hardcoded list would have contained.
+	exe := filepath.Join(root, "freebuff-desktop-0.0.158")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write launcher: %v", err)
+	}
+	desktop := "[Desktop Entry]\nType=Application\nName=Freebuff\nExec=" +
+		"freebuff-desktop-0.0.158 %U\nTerminal=true\n"
+	if err := os.WriteFile(filepath.Join(root, "freebuff.desktop"), []byte(desktop), 0o644); err != nil {
+		t.Fatalf("write desktop: %v", err)
+	}
+	got := relaunchExe(root)
+	if got == "" {
+		t.Fatalf("the launcher must be found through the .desktop file")
+	}
+	if filepath.Base(got) != "freebuff-desktop-0.0.158" {
+		t.Fatalf("relaunchExe() = %q, want the versioned launcher", got)
+	}
+}
+
+func TestExecFieldFromDesktop(t *testing.T) {
+	cases := map[string]string{
+		"Exec=freebuff\n":                    "freebuff",
+		"Exec=freebuff %U\n":                 "freebuff",
+		"Exec=/opt/freebuff --flag %F\n":     "/opt/freebuff",
+		"Exec=\"/opt/my app/freebuff\" %U\n": "/opt/my app/freebuff",
+		"Name=Freebuff\n":                    "",
+		"Exec=%UNKNOWN%\n":                   "",
+		"Exec=\n":                            "",
+	}
+	for body, want := range cases {
+		if got := execFieldFromDesktop(body); got != want {
+			t.Fatalf("execFieldFromDesktop(%q) = %q, want %q", body, got, want)
+		}
+	}
+}
+
+// A versioned .desktop entry is what the real AppImage ships, so the shortcut
+// has to be written from it rather than skipped.
+func TestAppImageShortcutUsesDesktopEntryLauncher(t *testing.T) {
+	base := withStateDir(t)
+	root := filepath.Join(base, "FreebuffThemeStudio", "squashfs-root")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	exe := filepath.Join(root, "freebuff-desktop-0.0.158")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write launcher: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "freebuff.desktop"),
+		[]byte("[Desktop Entry]\nExec=freebuff-desktop-0.0.158 %U\n"), 0o644); err != nil {
+		t.Fatalf("write desktop: %v", err)
+	}
+	if err := appImageShortcut(root); err != nil {
+		t.Fatalf("appImageShortcut must succeed now: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(base, "applications", "freebuff-themed.desktop"))
+	if err != nil {
+		t.Fatalf("read shortcut: %v", err)
+	}
+	if !strings.Contains(string(b), "Exec="+exe) {
+		t.Fatalf("the shortcut must point at the versioned launcher, got:\n%s", string(b))
 	}
 }

@@ -141,9 +141,7 @@ func runningExecutable() string {
 		if !p.IsDir() || !isNumericName(p.Name()) {
 			continue
 		}
-		comm := strings.ToLower(processNameFromProc(p.Name()))
-		looksLikeUs := strings.Contains(comm, "freebuff") || strings.Contains(comm, "codebuff")
-		if !looksLikeUs {
+		if !isFreebuffProcess(p.Name()) {
 			continue
 		}
 		exe, err := os.Readlink(filepath.Join("/proc", p.Name(), "exe"))
@@ -232,6 +230,41 @@ func isNumericName(s string) bool {
 
 // freebuffRunning asks the process table; pgrep is not guaranteed to exist, so
 // /proc is walked directly.
+/*
+ * isFreebuffProcess decides whether a pid really is Freebuff.
+ *
+ * Matching the process name is not enough: this injector is itself called
+ * FreebuffThemeInjector, so it matched itself and every run reported "Freebuff
+ * is already running". The name in /proc/<pid>/comm is also truncated to 15
+ * characters, so filtering on it is unreliable either way. The executable path
+ * is what tells the two apart.
+ */
+func isFreebuffProcess(pid string) bool {
+	if pid == strconv.Itoa(os.Getpid()) {
+		return false
+	}
+	comm := strings.ToLower(processNameFromProc(pid))
+	if !strings.Contains(comm, "freebuff") && !strings.Contains(comm, "codebuff") {
+		return false
+	}
+	// This very program, however it was renamed.
+	exe, err := os.Readlink(filepath.Join("/proc", pid, "exe"))
+	if err == nil {
+		self, err := os.Executable()
+		if err == nil {
+			selfAbs, _ := filepath.Abs(self)
+			exeAbs, _ := filepath.Abs(exe)
+			if selfAbs == exeAbs {
+				return false
+			}
+		}
+		if strings.Contains(strings.ToLower(filepath.Base(exe)), "injector") {
+			return false
+		}
+	}
+	return true
+}
+
 func freebuffRunning() bool {
 	procs, err := os.ReadDir("/proc")
 	if err != nil {
@@ -241,7 +274,7 @@ func freebuffRunning() bool {
 		if !p.IsDir() || !isNumericName(p.Name()) {
 			continue
 		}
-		if strings.Contains(strings.ToLower(processNameFromProc(p.Name())), "freebuff") {
+		if isFreebuffProcess(p.Name()) {
 			return true
 		}
 	}
@@ -310,6 +343,12 @@ func signalAll(match string, sig syscall.Signal) {
  * the app themselves, which is also what the update path needs.
  */
 func relaunchExe(install string) string {
+	// The launcher name is not predictable: an AppImage keeps whatever name the
+	// build used, often versioned. The .desktop file it ships is the authoritative
+	// answer, so it is asked first.
+	if exe := desktopEntryExe(install); exe != "" {
+		return exe
+	}
 	names := []string{
 		"Freebuff", "freebuff", "Freebuff.sh", "freebuff.sh",
 		"Freebuff.AppImage", "freebuff.AppImage",
@@ -509,6 +548,73 @@ func bunBinary(install string) string {
 	}
 	if p, err := exec.LookPath("bun"); err == nil {
 		return p
+	}
+	return ""
+}
+
+/*
+ * desktopEntryExe reads the Exec line out of the .desktop file an AppImage
+ * carries at its root. Guessing the binary name does not work: a versioned
+ * AppImage like Freebuff-0.0.158-linux-x86_64.AppImage extracts to a tree whose
+ * launcher is not called "freebuff", which is why the menu shortcut could not be
+ * written.
+ *
+ * The Exec line may carry field codes and arguments; only the program part is
+ * kept, and a relative path is resolved against the install root.
+ */
+func desktopEntryExe(install string) string {
+	entries, err := os.ReadDir(install)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".desktop") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(install, name))
+		if err != nil {
+			continue
+		}
+		program := execFieldFromDesktop(string(b))
+		if program == "" {
+			continue
+		}
+		p := program
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(install, p)
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// execFieldFromDesktop pulls the program out of an Exec line, dropping the
+// standard field codes (%U, %F, %u, %f, %i, %c, %k) and any arguments.
+func execFieldFromDesktop(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Exec=") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "Exec="))
+		for _, field := range []string{"%U", "%F", "%u", "%f", "%i", "%c", "%k"} {
+			value = strings.ReplaceAll(value, field, "")
+		}
+		if strings.Contains(value, "%") {
+			// An unknown code could hide part of the command; do not guess.
+			return ""
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		if i := strings.IndexAny(value, " \t"); i > 0 {
+			value = value[:i]
+		}
+		return strings.Trim(value, `"'`)
 	}
 	return ""
 }

@@ -56,8 +56,7 @@ func runningAppImage() string {
 		if !p.IsDir() || !isNumericName(p.Name()) {
 			continue
 		}
-		comm := strings.ToLower(processNameFromProc(p.Name()))
-		if !strings.Contains(comm, "freebuff") && !strings.Contains(comm, "codebuff") {
+		if !isFreebuffProcess(p.Name()) {
 			continue
 		}
 		if app := appImageEnvOf(p.Name()); app != "" {
