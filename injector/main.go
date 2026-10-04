@@ -42,7 +42,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.5.2"
+	version       = "1.5.3"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
@@ -973,6 +973,17 @@ func installWatch(install string) error {
 	return nil
 }
 
+// staleName picks the fallback name for a file that could not be deleted, which
+// happens when the guard image is still shutting down. Renaming a path that
+// already ends in .old must not append a second .old, or every repeated
+// --remove-watch leaves another file behind.
+func staleName(path string) string {
+	if strings.HasSuffix(path, ".old") {
+		return strings.TrimSuffix(path, ".old") + ".stale"
+	}
+	return path + ".old"
+}
+
 // removeWatch takes the guard away again: no logon entry, no process, no files.
 func removeWatch() {
 	clearRunEntry()
@@ -980,8 +991,10 @@ func removeWatch() {
 	clearGuard()
 	for _, f := range []string{watchPidPath(), watchExePath(), watchLogPath(), watchExePath() + ".old"} {
 		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
-			// An image that is still shutting down can only be moved aside.
-			_ = os.Rename(f, f+".old")
+			// An image that is still shutting down can only be moved aside. The
+			// entry may already carry the suffix, and renaming it again would
+			// leave a .old.old behind on every repeated --remove-watch.
+			_ = os.Rename(f, staleName(f))
 		}
 	}
 	// The folder belongs to this guard and nothing else. Failing to remove a

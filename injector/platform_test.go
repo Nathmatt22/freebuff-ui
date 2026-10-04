@@ -348,3 +348,23 @@ func TestCheckWritableAcceptsNormalInstall(t *testing.T) {
 		t.Fatalf("a writable install must pass checkWritable: %v", err)
 	}
 }
+
+// staleName guards against the .old.old pile-up: the guard image often cannot be
+// deleted while it is shutting down, so it is renamed aside, and the fallback
+// ran on a path that already carried the suffix.
+func TestStaleNameNeverDoublesTheSuffix(t *testing.T) {
+	cases := map[string]string{
+		"C:/x/FreebuffThemeInjector.exe":     "C:/x/FreebuffThemeInjector.exe.old",
+		"C:/x/FreebuffThemeInjector.exe.old": "C:/x/FreebuffThemeInjector.exe.stale",
+		"C:/x/watcher.pid":                   "C:/x/watcher.pid.old",
+	}
+	for in, want := range cases {
+		got := staleName(in)
+		if got != want {
+			t.Fatalf("staleName(%q) = %q, want %q", in, got, want)
+		}
+		if strings.Contains(got, ".old.old") {
+			t.Fatalf("staleName(%q) produced a doubled suffix: %q", in, got)
+		}
+	}
+}
