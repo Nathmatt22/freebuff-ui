@@ -593,6 +593,10 @@ func desktopEntryExe(install string) string {
 
 // execFieldFromDesktop pulls the program out of an Exec line, dropping the
 // standard field codes (%U, %F, %u, %f, %i, %c, %k) and any arguments.
+//
+// Quoting is handled first: a program path may contain spaces, and splitting on
+// whitespace before removing the quotes truncates it to "/opt/my" instead of
+// "/opt/my app/freebuff".
 func execFieldFromDesktop(body string) string {
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
@@ -611,10 +615,16 @@ func execFieldFromDesktop(body string) string {
 		if value == "" {
 			return ""
 		}
-		if i := strings.IndexAny(value, " \t"); i > 0 {
+		if strings.HasPrefix(value, `"`) {
+			if end := strings.Index(value[1:], `"`); end >= 0 {
+				return value[1 : 1+end]
+			}
+			return ""
+		}
+		if i := strings.IndexAny(value, " 	"); i >= 0 {
 			value = value[:i]
 		}
-		return strings.Trim(value, `"'`)
+		return value
 	}
 	return ""
 }
