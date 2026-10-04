@@ -26,15 +26,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 //go:embed assets/theme-engine.js
@@ -68,31 +66,6 @@ var (
 
 // ---------------------------------------------------------------- console ---
 
-func enableVT() bool {
-	if runtime.GOOS != "windows" {
-		return true
-	}
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	getStdHandle := kernel32.NewProc("GetStdHandle")
-	setConsoleMode := kernel32.NewProc("SetConsoleMode")
-	const stdOutputHandle = ^uintptr(10) // -11
-	h, _, _ := getStdHandle.Call(stdOutputHandle)
-	if h == 0 || h == uintptr(^uintptr(0)) {
-		return false
-	}
-	var mode uint32
-	// GetConsoleMode is exported too; if it fails the handle is not a console.
-	getConsoleMode := kernel32.NewProc("GetConsoleMode")
-	if r, _, _ := getConsoleMode.Call(h, uintptr(unsafe.Pointer(&mode))); r == 0 {
-		return false
-	}
-	const enableVirtualTerminalProcessing = 0x0004
-	if r, _, _ := setConsoleMode.Call(h, uintptr(mode|enableVirtualTerminalProcessing)); r == 0 {
-		return false
-	}
-	return true
-}
-
 func initColors() {
 	if enableVT() {
 		colBold = "\x1b[1m"
@@ -123,65 +96,9 @@ func step(msg string, a ...any) { fmt.Printf("\n%s%s%s\n", colBold, fmt.Sprintf(
 
 // --------------------------------------------------------------- locating ---
 
-func runningExecutable() string {
-	if runtime.GOOS != "windows" {
-		return ""
-	}
-	// Prefer the live process: it is the install the user actually runs.
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-		`(Get-Process Freebuff -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1).Path`)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	p := strings.TrimSpace(string(out))
-	if p == "" {
-		return ""
-	}
-	return p
-}
-
 func isInstallDir(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, "resources", "orchestrator", "ui", "index.html"))
 	return err == nil
-}
-
-func candidateDirs() []string {
-	var out []string
-
-	if exe := runningExecutable(); exe != "" {
-		out = append(out, filepath.Dir(exe))
-	}
-
-	local := os.Getenv("LOCALAPPDATA")
-	roaming := os.Getenv("APPDATA")
-	progFiles := os.Getenv("ProgramFiles")
-	progFilesX86 := os.Getenv("ProgramFiles(x86)")
-
-	names := []string{
-		"@codebufffreebuff-desktop",
-		"freebuff-desktop",
-		"Freebuff",
-		"Freebuff Desktop",
-		"freebuff",
-	}
-	roots := []string{local, roaming, progFiles, progFilesX86}
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		for _, n := range names {
-			out = append(out, filepath.Join(root, "Programs", n))
-			out = append(out, filepath.Join(root, n))
-		}
-	}
-
-	// Running from the install tree itself.
-	if wd, err := os.Getwd(); err == nil {
-		out = append(out, wd)
-	}
-	return out
 }
 
 func findInstallDir(override string) (string, error) {
@@ -264,25 +181,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" {
-		return os.Rename(temp, path)
-	}
-	src, err := syscall.UTF16PtrFromString(temp)
-	if err != nil {
-		return err
-	}
-	dst, err := syscall.UTF16PtrFromString(path)
-	if err != nil {
-		return err
-	}
-	moveFileEx := syscall.NewLazyDLL("kernel32.dll").NewProc("MoveFileExW")
-	const moveFileReplaceExisting = 0x1
-	const moveFileWriteThrough = 0x8
-	result, _, callErr := moveFileEx.Call(uintptr(unsafe.Pointer(src)), uintptr(unsafe.Pointer(dst)), moveFileReplaceExisting|moveFileWriteThrough)
-	if result == 0 {
-		return fmt.Errorf("atomically replacing %s: %w", path, callErr)
-	}
-	return nil
+	return replaceFile(temp, path)
 }
 
 // markerBounds rejects partial, duplicated and out-of-order injection markers.
@@ -317,6 +216,15 @@ func stripInjected(html string) (string, bool, error) {
 	return html[:start] + suffix, true, nil
 }
 
+// injectorName is the file name of this program, which the theme engine shows
+// as the uninstall command.
+func injectorName() string {
+	if len(os.Args) == 0 {
+		return "FreebuffThemeInjector"
+	}
+	return filepath.Base(os.Args[0])
+}
+
 // ------------------------------------------------------------------ inject ---
 
 func scriptBlock(ui string) string {
@@ -333,7 +241,10 @@ func scriptBlock(ui string) string {
 	// The community list is a plain data file and must be loaded first: the
 	// engine reads it while it builds the Community tab.
 	b.WriteString(`  <script src="./assets/` + communityName + `"></script>` + nl)
-	b.WriteString(`  <script src="./assets/` + engineName + `" data-freebuff-theme-studio="` + version + `"></script>` + nl)
+	// The engine reads its own file name back from here so the uninstall
+	// command it shows is the one that exists on this machine.
+	b.WriteString(`  <script src="./assets/` + engineName + `" data-freebuff-theme-studio="` + version +
+		`" data-injector-name="` + html.EscapeString(injectorName()) + `"></script>` + nl)
 	b.WriteString(markerEnd)
 	return b.String()
 }
@@ -615,10 +526,7 @@ type cookieReport struct {
 func profileCookieDBs() []string {
 	var names []string
 	seenName := map[string]bool{}
-	for _, root := range []string{os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")} {
-		if root == "" {
-			continue
-		}
+	for _, root := range cookieRoots() {
 		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
@@ -640,10 +548,7 @@ func profileCookieDBs() []string {
 	}
 
 	var candidates []string
-	for _, root := range []string{os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")} {
-		if root == "" {
-			continue
-		}
+	for _, root := range cookieRoots() {
 		for _, name := range names {
 			base := filepath.Join(root, name)
 			candidates = append(candidates, filepath.Join(base, "Network", "Cookies"))
@@ -679,27 +584,11 @@ func profileCookieDBs() []string {
 	return out
 }
 
-func bunBinary(install string) string {
-	for _, p := range []string{
-		filepath.Join(install, "resources", "bun", "bun.exe"),
-		filepath.Join(install, "resources", "bun", "bun-baseline.exe"),
-		filepath.Join(install, "resources", "orchestrator", "bun.exe"),
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	if p, err := exec.LookPath("bun"); err == nil {
-		return p
-	}
-	return ""
-}
-
 // runCookieScript opens a profile cookie jar and either reports or clears the
 // theme cookies in it.
 func runCookieScript(bun, db, action string) (*cookieReport, error) {
 	cmd := exec.Command(bun, "-e", cookieDBScript)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	hideProc(cmd)
 	cmd.Env = append(os.Environ(), "FREEBUFF_COOKIE_DB="+db, "FBTS_COOKIE_ACTION="+action)
 	out, err := cmd.Output()
 	if err != nil {
@@ -714,30 +603,6 @@ func runCookieScript(bun, db, action string) (*cookieReport, error) {
 		return nil, fmt.Errorf("could not read the cookie check output: %w", err)
 	}
 	return &rep, nil
-}
-
-// stopFreebuff asks the app to close and waits for it, because Chromium holds
-// the cookie jar in memory and would write it back over any changes we make.
-func stopFreebuff(quiet bool) bool {
-	if !freebuffRunning() {
-		return true
-	}
-	if !quiet {
-		info("Asking Freebuff to close\u2026")
-	}
-	cmd := exec.Command("taskkill", "/IM", "Freebuff.exe")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = cmd.Run()
-	for i := 0; i < 60; i++ {
-		if !freebuffRunning() {
-			return true
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if !quiet {
-		warn("Freebuff is still running - close it by hand and try again")
-	}
-	return false
 }
 
 // clearThemeCookies is the escape hatch for an install whose theme cookies are
@@ -822,34 +687,6 @@ func checkThemeCookies(install string) {
 
 // ------------------------------------------------------------------- misc ---
 
-func freebuffRunning() bool {
-	if runtime.GOOS != "windows" {
-		return false
-	}
-	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq Freebuff.exe", "/NH")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(string(out)), "freebuff.exe")
-}
-
-func relaunch(ui string) {
-	// Freebuff.exe lives at the install root.
-	exe := filepath.Join(ui, "Freebuff.exe")
-	if _, err := os.Stat(exe); err != nil {
-		warn("Could not find %s to relaunch", exe)
-		return
-	}
-	info("Launching Freebuff\u2026")
-	cmd := exec.Command(exe)
-	cmd.Dir = ui
-	if err := cmd.Start(); err != nil {
-		warn("Could not launch Freebuff: %v", err)
-	}
-}
-
 // ------------------------------------------------------- update survival ---
 
 /*
@@ -888,63 +725,17 @@ const (
 )
 
 func watchDir() string {
-	base := os.Getenv("LOCALAPPDATA")
+	base := watchBaseDir()
 	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		base = filepath.Join(home, "AppData", "Local")
+		return ""
 	}
 	return filepath.Join(base, "FreebuffThemeStudio")
 }
 
-func watchExePath() string { return filepath.Join(watchDir(), "FreebuffThemeInjector.exe") }
+func watchExePath() string { return filepath.Join(watchDir(), guardExeName()) }
 func watchPidPath() string { return filepath.Join(watchDir(), "watcher.pid") }
 func watchLogPath() string { return filepath.Join(watchDir(), "watcher.log") }
 func guardPath() string    { return filepath.Join(watchDir(), "guard.json") }
-
-// hideConsoleWindow is what keeps the guard from flashing a console at logon.
-// A process started from the Run key gets a console of its own.
-func hideConsoleWindow() {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	h, _, _ := syscall.NewLazyDLL("kernel32.dll").NewProc("GetConsoleWindow").Call()
-	if h != 0 {
-		_, _, _ = syscall.NewLazyDLL("user32.dll").NewProc("ShowWindow").Call(h, 0) // SW_HIDE
-	}
-}
-
-// On Windows os.FindProcess opens the process and fails when the pid is gone.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	_ = p.Release()
-	return true
-}
-
-func processName(pid int) string {
-	if runtime.GOOS != "windows" {
-		return ""
-	}
-	cmd := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	fields := strings.Split(string(out), ",")
-	if len(fields) < 2 {
-		return ""
-	}
-	return strings.Trim(strings.TrimSpace(fields[0]), `"`)
-}
 
 func readWatchPid() int {
 	b, err := os.ReadFile(watchPidPath())
@@ -1025,30 +816,6 @@ func clearGuard() {
 	_ = os.Remove(guardPath())
 }
 
-func runKey() string { return `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` }
-
-func setRunEntry(command string) error {
-	cmd := exec.Command("reg", "add", runKey(), "/v", watchRunName, "/t", "REG_SZ", "/d", command, "/f")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("registering the guard to start at logon: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func clearRunEntry() {
-	cmd := exec.Command("reg", "delete", runKey(), "/v", watchRunName, "/f")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = cmd.Run() // absent is the normal case during uninstall
-}
-
-func runEntryPresent() bool {
-	cmd := exec.Command("reg", "query", runKey(), "/v", watchRunName)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	return err == nil && strings.Contains(string(out), watchRunName)
-}
-
 // startWatcher launches the guard detached from this console so it does not
 // die when the installer's window closes.
 func startWatcher() {
@@ -1057,7 +824,7 @@ func startWatcher() {
 		return
 	}
 	cmd := exec.Command(exe, "--watch", "--quiet")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: detachedFlag}
+	detachProc(cmd)
 	if err := cmd.Start(); err != nil {
 		watchLog("could not start the guard: " + err.Error())
 		return
@@ -1071,7 +838,7 @@ func startWatcher() {
 func promoteWatcher() error {
 	dir := watchDir()
 	if dir == "" {
-		return errors.New("LOCALAPPDATA is not set")
+		return errors.New("the home directory could not be determined")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -1237,7 +1004,7 @@ func main() {
 		resetFlag       = flag.Bool("reset-theme", false, "delete the stored theme cookies (the fix for an app that opens on a blank window)")
 		repairFlag      = flag.Bool("repair", false, "reinstall the current files while preserving stored theme settings")
 		restartFlag     = flag.Bool("restart", false, "close Freebuff if it is running and start it again")
-		openFlag        = flag.Bool("open", false, "open the UI folder in Explorer")
+		openFlag        = flag.Bool("open", false, "open the UI folder in the file manager")
 		quietFlag       = flag.Bool("quiet", false, "less output")
 		watchFlag       = flag.Bool("watch", false, "run quietly in the background, re-injecting after Freebuff updates")
 		removeWatchFlag = flag.Bool("remove-watch", false, "stop the background guard and remove it from logon")
@@ -1251,13 +1018,17 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  FreebuffThemeInjector.exe")
-		fmt.Println("  FreebuffThemeInjector.exe --restart")
-		fmt.Println("  FreebuffThemeInjector.exe --theme my-theme.json")
-		fmt.Println("  FreebuffThemeInjector.exe --status")
-		fmt.Println("  FreebuffThemeInjector.exe --remove-watch")
-		fmt.Println("  FreebuffThemeInjector.exe --repair --restart")
-		fmt.Println("  FreebuffThemeInjector.exe --uninstall")
+		fmt.Printf("  %s\n", injectorName())
+		for _, a := range []string{
+			"--restart",
+			"--theme my-theme.json",
+			"--status",
+			"--remove-watch",
+			"--repair --restart",
+			"--uninstall",
+		} {
+			fmt.Printf("  %s %s\n", injectorName(), a)
+		}
 		fmt.Println()
 		fmt.Println("If Freebuff opens on an empty grey window, run --reset-theme. That is")
 		fmt.Println("caused by a theme too big for the app to carry, and clearing it fixes it.")
@@ -1391,7 +1162,7 @@ func main() {
 	// explicit --reset-theme flag when the user wants to clear stored settings.
 
 	if *openFlag {
-		_ = exec.Command("explorer.exe", ui).Start()
+		openFolder(ui)
 	}
 
 	if quiet {

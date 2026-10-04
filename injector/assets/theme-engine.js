@@ -17,6 +17,25 @@
   'use strict'
 
   var VERSION = '1.3.4'
+
+  /*
+   * The uninstall command to show and copy. The injector writes its own file
+   * name into the script tag's data attribute, so the panel shows the command
+   * that actually exists on this machine: .exe on Windows, plain elsewhere.
+   */
+  var UNINSTALL_CMD = (function () {
+    var name = ''
+    try {
+      var script = document.querySelector('script[data-freebuff-theme-studio]')
+      if (script && script.getAttribute('data-injector-name')) {
+        name = script.getAttribute('data-injector-name')
+      }
+    } catch (e) { /* fall through to the guess below */ }
+    if (!name) {
+      name = /Windows/i.test(navigator.userAgent || '') ? 'FreebuffThemeInjector.exe' : './FreebuffThemeInjector'
+    }
+    return name + ' --uninstall'
+  })()
   if (window.__FREEBUFF_THEME_STUDIO__) return
   window.__FREEBUFF_THEME_STUDIO__ = VERSION
 
@@ -5151,13 +5170,13 @@
       modalBody.appendChild(
         el('p', { text: 'To remove the panel as well, run the installer you downloaded once more with --uninstall. It takes the panel, the engine and the community file out of the install folder and puts Freebuff\u2019s own index.html back.' }),
       )
-      var command = el('code', { class: 'fbts-code', text: 'FreebuffThemeInjector.exe --uninstall' })
+      var command = el('code', { class: 'fbts-code', text: UNINSTALL_CMD })
       modalBody.appendChild(el('p', {}, [command]))
       modalBody.appendChild(
         el('div', { class: 'fbts-modal-foot' }, [
           el('button', {
             class: 'fbts-btn primary', type: 'button', text: 'Copy the command',
-            onclick: function () { copyText('FreebuffThemeInjector.exe --uninstall', 'Command copied') },
+            onclick: function () { copyText(UNINSTALL_CMD, 'Command copied') },
           }),
           el('button', { class: 'fbts-btn', type: 'button', text: 'Get the installer again', onclick: function () { openReleasesPage() } }),
           el('button', { class: 'fbts-btn', type: 'button', text: 'Close', onclick: function () { closePopup() } }),

@@ -3,6 +3,12 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
+# locally built binaries, all platforms (dist/ only ever ships the Windows one)
+dist/FreebuffThemeInjector
+dist/FreebuffThemeInjector-arm64
+dist/FreebuffThemeInjector-darwin
+dist/FreebuffThemeInjector-darwin-amd64
+
 # artifacts left behind when the injector is run against the sandbox tree
 sandbox/fake-install/resources/orchestrator/ui/assets/freebuff-theme-studio.js
 sandbox/fake-install/resources/orchestrator/ui/assets/freebuff-theme-community.js
