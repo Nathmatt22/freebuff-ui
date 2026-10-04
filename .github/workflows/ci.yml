@@ -1,0 +1,121 @@
+name: CI
+
+# The platform layer is selected by build tags, so compiling for one OS proves
+# nothing about the others. These jobs run the tests on real runners to keep
+# that honest, and the release job cross-compiles the binaries that ship.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.21 is the floor in go.mod, so test it rather than only the latest.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: injector/go.mod
+
+      - name: check formatting
+        working-directory: injector
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: vet
+        working-directory: injector
+        run: go vet ./...
+
+      - name: test
+        working-directory: injector
+        run: go test -count=1 -race ./...
+
+      - name: build
+        working-directory: injector
+        run: go build -trimpath -ldflags "-s -w" -o "$RUNNER_TEMP/injector" .
+
+      - name: smoke test the built binary
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/injector" --help
+          "$RUNNER_TEMP/injector" --status --path "$(pwd)/sandbox/fake-install" || true
+
+  cross-compile:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: injector/go.mod
+
+      # A GOOS-only vet does not typecheck build-tagged code, so each target is
+      # built for real rather than merely vetted.
+      - name: build every supported target
+        working-directory: injector
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64 windows/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            echo "==> $target"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w" -o "$RUNNER_TEMP/$os-$arch" .
+            "$RUNNER_TEMP/$os-$arch" --help >/dev/null 2>&1 || true
+          done
+
+      - name: check the theme engine parses
+        run: node --check injector/assets/theme-engine.js
+
+  release:
+    name: release
+    needs: [test, cross-compile]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+          cache-dependency-path: injector/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: build the release binaries
+        run: ./build.sh --all
+
+      - name: publish
+        if: ${{ !github.event.repository.fork }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

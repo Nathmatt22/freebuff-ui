@@ -23,8 +23,12 @@ if ! command -v "$go_bin" >/dev/null 2>&1; then
 fi
 
 echo "==> checking theme engine syntax"
-node --check "$here/injector/assets/theme-engine.js"
-echo "    ok"
+if command -v node >/dev/null 2>&1; then
+  node --check "$here/injector/assets/theme-engine.js"
+  echo "    ok"
+else
+  echo "    (node not found, skipping the engine syntax check)"
+fi
 
 # build <goos> <goarch> <outfile>
 build() {
