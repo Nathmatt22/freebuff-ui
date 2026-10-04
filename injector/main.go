@@ -101,6 +101,20 @@ func isInstallDir(dir string) bool {
 	return err == nil
 }
 
+// notFoundHelp explains what to do when detection fails, which on Linux has a
+// specific answer that a bare "--path" hint does not give.
+func notFoundHelp() string {
+	var b strings.Builder
+	b.WriteString("  Open Freebuff first if it is not running: a Linux AppImage only\n")
+	b.WriteString("  exists on disk while it is running.\n\n")
+	b.WriteString("  Otherwise pass --path with the folder that holds this:\n")
+	b.WriteString("      resources/orchestrator/ui/index.html\n\n")
+	b.WriteString("  An extracted AppImage uses its squashfs-root folder:\n")
+	b.WriteString("      ./Freebuff-linux-x86_64.AppImage --appimage-extract\n")
+	b.WriteString("      ./FreebuffThemeInjector --path squashfs-root\n")
+	return b.String()
+}
+
 func findInstallDir(override string) (string, error) {
 	if override != "" {
 		abs, err := filepath.Abs(override)
@@ -122,7 +136,7 @@ func findInstallDir(override string) (string, error) {
 			return c, nil
 		}
 	}
-	return "", errors.New("could not find a Freebuff Desktop install; pass --path <install dir>")
+	return "", errors.New("could not find a Freebuff Desktop install\n\n" + notFoundHelp())
 }
 
 // ---------------------------------------------------------------- manifest ---
@@ -216,6 +230,28 @@ func stripInjected(html string) (string, bool, error) {
 	return html[:start] + suffix, true, nil
 }
 
+// checkWritable refuses early when the install cannot be written to. A live
+// AppImage mount is the case that matters: the write would fail much later, in
+// the middle of replacing index.html, with a bare permission error.
+func checkWritable(ui string) error {
+	dir := filepath.Dir(ui)
+	probe, err := os.CreateTemp(dir, ".fbts-probe-*")
+	if err != nil {
+		if os.IsPermission(err) {
+			return fmt.Errorf("%s cannot be written to, so the panel cannot be installed there.\n\n"+
+				"       A running Linux AppImage is mounted read-only. Extract it first and\n"+
+				"       point --path at the extracted folder:\n"+
+				"           ./Freebuff-linux-x86_64.AppImage --appimage-extract\n"+
+				"           ./FreebuffThemeInjector --path squashfs-root\n", ui)
+		}
+		return err
+	}
+	name := probe.Name()
+	probe.Close()
+	_ = os.Remove(name)
+	return nil
+}
+
 // injectorName is the file name of this program, which the theme engine shows
 // as the uninstall command.
 func injectorName() string {
@@ -252,6 +288,9 @@ func scriptBlock(ui string) string {
 // inject is idempotent: re-running replaces the marker block rather than
 // stacking a second one.
 func inject(ui string, quiet bool) error {
+	if err := checkWritable(ui); err != nil {
+		return err
+	}
 	idx := indexPath(ui)
 	original, err := os.ReadFile(idx)
 	if err != nil {

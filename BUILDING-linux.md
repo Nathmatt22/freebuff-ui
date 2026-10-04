@@ -52,6 +52,38 @@ operating systems lives behind a build tag:
 Adding a platform means adding one file next to
 `injector/platform_windows.go`, with the same function names.
 
+## Freebuff Desktop on Linux is an AppImage
+
+This is the part that matters in practice, and it is not like any other
+platform.
+
+Freebuff ships for Linux as a single **AppImage** file, not as an installed
+directory. Two consequences:
+
+1. **A running AppImage has no install directory.** It is a squashfs image the
+   kernel mounts read-only under `/tmp/.mount_XXXXXX` for as long as it runs.
+   The injector therefore finds it through `/proc/<pid>/exe` rather than by
+   looking for a folder, and falls back to that mount.
+2. **That mount cannot be written to.** The injection would fail with a bare
+   permission error halfway through replacing `index.html`.
+
+So the supported way to install the panel on Linux is to extract the AppImage
+first, which gives a writable tree:
+
+```sh
+chmod +x Freebuff-linux-x86_64.AppImage
+./Freebuff-linux-x86_64.AppImage --appimage-extract
+./FreebuffThemeInjector --path squashfs-root
+./squashfs-root/freebuff          # start Freebuff from the extracted copy
+```
+
+Run Freebuff from the extracted folder, not from the AppImage: the panel is
+installed into the copy you launch.
+
+If auto-detection finds nothing, the injector says this rather than just
+asking for `--path`. If you point `--path` at a read-only mount, it says that
+too instead of failing with a permission error.
+
 ## What the injector does on Linux
 
 The mechanism is identical to Windows. Freebuff's renderer is served by a Bun

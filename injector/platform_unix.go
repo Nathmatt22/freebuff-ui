@@ -98,6 +98,23 @@ func candidateDirs() []string {
 		}
 	}
 
+	// A running AppImage: the only copy of the files that exists on disk.
+	out = append(out, appImageMounts()...)
+
+	// An extracted AppImage, either squashfs-root next to the download or an
+	// AppImageLauncher directory, which is writable - unlike the live mount.
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, base := range []string{"", filepath.Join(".local", "share"), filepath.Join("Applications")} {
+			root := filepath.Join(home, base)
+			out = append(out,
+				filepath.Join(root, "squashfs-root"),
+				filepath.Join(root, "Applications", "Freebuff"),
+				filepath.Join(root, "Freebuff-linux-x86_64.AppImage"),
+				filepath.Join(root, "Freebuff-linux-arm64.AppImage"),
+			)
+		}
+	}
+
 	if wd, err := os.Getwd(); err == nil {
 		out = append(out, wd)
 	}
@@ -106,22 +123,59 @@ func candidateDirs() []string {
 
 // runningExecutable prefers the live process, because that is the install the
 // user actually runs. /proc holds the real path for every process we can see.
+/*
+ * An AppImage is a single file that the kernel mounts read-only under
+ * /tmp/.mount_XXXXXX while it runs, so a running Freebuff is found by its
+ * process rather than by an install directory: /proc/<pid>/exe resolves to the
+ * binary inside that mount, and the install is its parent directory.
+ *
+ * The process name is checked as well as the exe path, because an AppImage can
+ * be renamed to anything the user likes while the process keeps a generic name.
+ */
 func runningExecutable() string {
-	if procs, err := os.ReadDir("/proc"); err == nil {
-		for _, p := range procs {
-			if !p.IsDir() || !isNumericName(p.Name()) {
-				continue
-			}
-			exe, err := os.Readlink(filepath.Join("/proc", p.Name(), "exe"))
-			if err != nil {
-				continue
-			}
-			if strings.Contains(strings.ToLower(filepath.Base(exe)), "freebuff") && isInstallDir(filepath.Dir(exe)) {
+	procs, err := os.ReadDir("/proc")
+	if err != nil {
+		return ""
+	}
+	for _, p := range procs {
+		if !p.IsDir() || !isNumericName(p.Name()) {
+			continue
+		}
+		comm := strings.ToLower(processNameFromProc(p.Name()))
+		looksLikeUs := strings.Contains(comm, "freebuff") || strings.Contains(comm, "codebuff")
+		if !looksLikeUs {
+			continue
+		}
+		exe, err := os.Readlink(filepath.Join("/proc", p.Name(), "exe"))
+		if err != nil {
+			continue
+		}
+		// "<mount>/usr/bin/freebuff" -> "<mount>", which is the install root.
+		for dir := filepath.Dir(exe); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+			if isInstallDir(dir) {
 				return exe
 			}
 		}
 	}
 	return ""
+}
+
+// appImageMounts lists the squashfs mounts an AppImage creates while running.
+// They are the only place the app's files exist on disk for a portable build.
+func appImageMounts() []string {
+	var out []string
+	entries, err := os.ReadDir("/tmp")
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || !strings.HasPrefix(name, ".mount_") {
+			continue
+		}
+		out = append(out, filepath.Join("/tmp", name))
+	}
+	return out
 }
 
 func isNumericName(s string) bool {
@@ -202,14 +256,22 @@ func signalAll(match string, sig syscall.Signal) {
 	}
 }
 
-// relaunchExe finds the Freebuff launcher inside an install. Unlike Windows
-// there is no fixed name, so the usual AppImage / wrapper / bare-binary shapes
-// are tried in turn.
+/*
+ * relaunchExe finds the Freebuff launcher for an install. Unlike Windows there
+ * is no fixed name, so the usual shapes are tried in turn.
+ *
+ * An AppImage install is a squashfs mount: the real binary lives under usr/bin
+ * inside it, and running that copy directly would start a second, unmounted
+ * instance. So a live mount has no relaunch target and the user is told to start
+ * the app themselves, which is also what the update path needs.
+ */
 func relaunchExe(install string) string {
 	names := []string{
 		"Freebuff", "freebuff", "Freebuff.sh", "freebuff.sh",
 		"Freebuff.AppImage", "freebuff.AppImage",
-		"freebuff-desktop", "Freebuff Desktop", "Freebuff.AppImage",
+		"freebuff-desktop", "Freebuff Desktop",
+		"bin/Freebuff", "bin/freebuff",
+		"usr/bin/Freebuff", "usr/bin/freebuff",
 	}
 	for _, n := range names {
 		p := filepath.Join(install, n)

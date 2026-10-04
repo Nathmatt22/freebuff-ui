@@ -266,3 +266,42 @@ func TestRelaunchExeDoesNotPanicOnEmptyInstall(t *testing.T) {
 		t.Fatalf("an empty directory must contain no launcher, got %q", p)
 	}
 }
+
+// The not-found message is what a Linux user sees when auto-detection fails; it
+// must name the AppImage workflow, which is the actual answer there.
+func TestNotFoundHelpMentionsAppImage(t *testing.T) {
+	msg := notFoundHelp()
+	for _, want := range []string{"--path", "AppImage", "squashfs-root", "index.html"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("notFoundHelp() should mention %q, got:\n%s", want, msg)
+		}
+	}
+}
+
+// A Linux install is an extracted AppImage root, which is what --path
+// squashfs-root points at, so it has to count as an install.
+func TestExtractedAppImageRootIsAnInstall(t *testing.T) {
+	root := t.TempDir()
+	ui := filepath.Join(root, "resources", "orchestrator", "ui")
+	if err := os.MkdirAll(ui, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(indexPath(ui), []byte(sampleIndex), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !isInstallDir(root) {
+		t.Fatalf("an extracted AppImage root must count as an install")
+	}
+	if _, err := findInstallDir(root); err != nil {
+		t.Fatalf("an extracted AppImage root must be accepted by --path: %v", err)
+	}
+}
+
+// A writable tree must pass the guard that keeps us from failing later, halfway
+// through replacing index.html, on a read-only AppImage mount.
+func TestCheckWritableAcceptsOrdinaryDirectory(t *testing.T) {
+	_, ui := newTestInstall(t, sampleIndex)
+	if err := checkWritable(ui); err != nil {
+		t.Fatalf("a writable ui dir must pass: %v", err)
+	}
+}
