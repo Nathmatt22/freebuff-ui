@@ -42,7 +42,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.5.3"
+	version       = "1.5.4"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
@@ -116,6 +116,18 @@ func notFoundHelp() string {
 }
 
 func findInstallDir(override string) (string, error) {
+	return findInstall(override, true)
+}
+
+/*
+ * findInstall with allowSetup false only looks; it never extracts.
+ *
+ * The background guard must use that: it ticks every 15 seconds, and on Linux
+ * the setup path unpacks a whole AppImage. A guard that found the extracted copy
+ * missing would otherwise start re-extracting silently, forever, in a process
+ * that prints nothing.
+ */
+func findInstall(override string, allowSetup bool) (string, error) {
 	if override != "" {
 		abs, err := filepath.Abs(override)
 		if err != nil {
@@ -130,7 +142,7 @@ func findInstallDir(override string) (string, error) {
 	// A Linux machine with nothing installed yet still has an AppImage on disk,
 	// and that is the shape Freebuff ships in. Extracting it up front is what
 	// lets one run of the injector do all the work.
-	if looksLikeAppImage() {
+	if allowSetup && looksLikeAppImage() {
 		if root, err := autoSetupAppImage(); err == nil {
 			return root, nil
 		}
@@ -162,7 +174,7 @@ func findInstallDir(override string) (string, error) {
 
 	// Only a read-only mount was found. Retry the automatic setup now that the
 	// process list has been walked, which is where the AppImage path comes from.
-	if readOnly != "" || looksLikeAppImage() {
+	if allowSetup && (readOnly != "" || looksLikeAppImage()) {
 		if root, err := autoSetupAppImage(); err == nil {
 			return root, nil
 		} else if err != nil {
@@ -1040,7 +1052,7 @@ func watchTick() {
 	// back to detection so the panel still comes back.
 	install := g.Install
 	if install == "" || !isInstallDir(install) {
-		found, err := findInstallDir("")
+		found, err := findInstall("", false)
 		if err != nil {
 			return // no Freebuff to guard right now
 		}

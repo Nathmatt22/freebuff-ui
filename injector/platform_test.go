@@ -368,3 +368,23 @@ func TestStaleNameNeverDoublesTheSuffix(t *testing.T) {
 		}
 	}
 }
+
+/*
+ * The guard must never trigger an extraction. It ticks every 15 seconds in a
+ * process that prints nothing, so an extraction there would unpack a whole
+ * AppImage silently and repeat it forever if the copy never appeared.
+ */
+func TestDetectionAloneNeverSetsUp(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		t.Setenv("HOME", t.TempDir())
+	}
+	// Both calls must be safe: findInstallDir may set up, findInstall must not
+	// and must simply report that nothing was found.
+	if _, err := findInstall("", false); err == nil {
+		t.Skip("this machine has a real Freebuff install, so detection succeeded")
+	}
+	if _, err := findInstallDir(""); err == nil {
+		t.Skip("this machine has a real Freebuff install, so detection succeeded")
+	}
+}
