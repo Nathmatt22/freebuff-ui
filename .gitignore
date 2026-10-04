@@ -8,6 +8,7 @@ dist/FreebuffThemeInjector
 dist/FreebuffThemeInjector-arm64
 dist/FreebuffThemeInjector-darwin
 dist/FreebuffThemeInjector-darwin-amd64
+dist/SHA256SUMS.txt
 
 # artifacts left behind when the injector is run against the sandbox tree
 sandbox/fake-install/resources/orchestrator/ui/assets/freebuff-theme-studio.js
