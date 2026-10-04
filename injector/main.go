@@ -42,7 +42,7 @@ var engineJS []byte
 var communityJS []byte
 
 const (
-	version       = "1.4.2"
+	version       = "1.5.0"
 	markerStart   = "<!-- freebuff-theme-studio:start -->"
 	markerEnd     = "<!-- freebuff-theme-studio:end -->"
 	engineName    = "freebuff-theme-studio.js"
@@ -126,6 +126,18 @@ func findInstallDir(override string) (string, error) {
 		}
 		return abs, nil
 	}
+
+	// A Linux machine with nothing installed yet still has an AppImage on disk,
+	// and that is the shape Freebuff ships in. Extracting it up front is what
+	// lets one run of the injector do all the work.
+	if looksLikeAppImage() {
+		if root, err := autoSetupAppImage(); err == nil {
+			return root, nil
+		}
+		// A failed automatic setup is not fatal: an installed copy may still be
+		// found below, and the reason is reported only if nothing works out.
+	}
+
 	seen := map[string]bool{}
 	var readOnly string
 	for _, c := range candidateDirs() {
@@ -146,6 +158,16 @@ func findInstallDir(override string) (string, error) {
 			continue
 		}
 		return c, nil
+	}
+
+	// Only a read-only mount was found. Retry the automatic setup now that the
+	// process list has been walked, which is where the AppImage path comes from.
+	if readOnly != "" || looksLikeAppImage() {
+		if root, err := autoSetupAppImage(); err == nil {
+			return root, nil
+		} else if err != nil {
+			return "", fmt.Errorf("%v", err)
+		}
 	}
 	if readOnly != "" {
 		return "", fmt.Errorf("found Freebuff at %s, but that is a running AppImage and it is\n"+
@@ -1236,6 +1258,10 @@ func main() {
 		fmt.Println()
 		fmt.Printf("%sDone.%s\n", colBold+colGreen, colReset)
 		fmt.Println()
+		if note := afterInstallNote(); note != "" {
+			fmt.Print(note)
+			fmt.Println()
+		}
 		fmt.Println("  Open Freebuff - a " + colBold + "palette icon" + colReset + " appears in the sidebar rail.")
 		fmt.Println("  Click it for presets, per-token colour pickers, layout and raw CSS.")
 		fmt.Println()
